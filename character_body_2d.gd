@@ -789,7 +789,7 @@ func _get_attack_tiles(shape: String) -> Array:
 			"jab":
 				# 1-tile hit in facing direction
 				var dist := to_g.dot(facing)
-				var perp  := abs(to_g.dot(facing.rotated(PI * 0.5)))
+				var perp: float = abs(to_g.dot(facing.rotated(PI * 0.5)))
 				if dist >= 0.0 and dist <= tile * 1.2 and perp <= tile * 0.7:
 					guards_hit.append(guard)
 			"slash":
@@ -801,7 +801,7 @@ func _get_attack_tiles(shape: String) -> Array:
 			"thrust":
 				# 2-tile straight ahead, narrow
 				var dist := to_g.dot(facing)
-				var perp  := abs(to_g.dot(facing.rotated(PI * 0.5)))
+				var perp: float = abs(to_g.dot(facing.rotated(PI * 0.5)))
 				if dist >= 0.0 and dist <= tile * 2.2 and perp <= tile * 0.5:
 					guards_hit.append(guard)
 
