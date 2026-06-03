@@ -1,0 +1,32 @@
+[gd_scene format=3 uid="uid://cc4ae7w1k36a2"]
+
+[ext_resource type="Script" uid="uid://c0thm4g02obyi" path="res://character_body_2d.gd" id="1_c6gwx"]
+[ext_resource type="Script" path="res://World.gd" id="2_world"]
+[ext_resource type="Script" uid="uid://4klhumh5vvg1" path="res://LevelMap.gd" id="3_levelmap"]
+[ext_resource type="PackedScene" path="res://Exit.tscn" id="5_exit"]
+[ext_resource type="PackedScene" path="res://HUD.tscn" id="6_hud"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_player"]
+size = Vector2(12, 12)
+
+[node name="World" type="Node2D"]
+position = Vector2(0, 0)
+script = ExtResource("2_world")
+
+[node name="LevelMap" type="Node2D" parent="."]
+script = ExtResource("3_levelmap")
+
+[node name="CharacterBody2D" type="CharacterBody2D" parent="." groups=["player"]]
+position = Vector2(224, 368)
+script = ExtResource("1_c6gwx")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="CharacterBody2D"]
+shape = SubResource("RectangleShape2D_player")
+
+[node name="Camera2D" type="Camera2D" parent="CharacterBody2D"]
+zoom = Vector2(3, 3)
+
+[node name="Exit" parent="." instance=ExtResource("5_exit")]
+position = Vector2(384, 528)
+
+[node name="HUD" parent="." instance=ExtResource("6_hud")]

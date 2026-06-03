@@ -1,0 +1,1405 @@
+extends Node
+
+enum State { PLAYING, CAUGHT, ESCAPED, SHOPPING, PASSIVE_PICK, EQUIPPING }
+
+var state       := State.PLAYING
+var run_time    := 0.0
+var takedowns   := 0
+var times_alerted      := 0
+var bonus_loot_collected := false
+var gold_collected := 0
+var gold_spent     := 0
+
+var selected_class  := "CUTPURSE"
+var run_modifier    := "NONE"
+var modifier_name   := "Standard Job"
+var modifier_desc   := "No special conditions."
+
+# Multi-floor state
+var current_floor   := 1
+const MAX_FLOORS    := 5
+
+# Alert escalation — cumulative alerts across all floors; guards get harder
+var alert_escalation := 0
+
+# ── Wanted level — persists across floors, has real mechanical consequences ──
+# 0=Unknown, 1=Spotted, 2=Recognized, 3=Notorious, 4=Hunted, 5=City Watch
+var wanted_level: int = 0
+var _wanted_bribe_used := false  # one bribe reduction per run
+
+# ── Health — carried between floors ─────────────────────────────────────────
+var player_hp: int     = 6
+var player_max_hp: int = 6
+
+# ── Injury flags — carried between floors ────────────────────────────────────
+var player_is_bleeding := false
+var player_is_limping  := false
+
+# ── Lockdown — if floor_alerts >= 2 on a floor, next floor gets a guard surge ─
+var _lockdown_incoming := false
+
+# Seeded run for layout randomisation
+var run_seed := 0
+
+# Per-floor complication (rolled in World._ready)
+var floor_complication := "CLEAR"
+var complication_name  := "Clear Night"
+var complication_desc  := "No complications."
+
+# Per-floor objective
+var floor_objective      := "NONE"
+var floor_objective_name := ""
+var floor_objective_desc := ""
+var floor_objective_bonus := 0
+var floor_alerts         := 0
+var floor_bodies_found   := 0   # bodies officially discovered by guards this floor
+var floor_takedowns      := 0
+var floor_bonus_collected := false
+var _floor_start_time    := 0.0
+
+# Heat system — guards escalate every 60 seconds on a floor
+var floor_heat_level: int = 0
+var floor_heat_accum: float = 0.0
+
+# Items and loadout carry over between floors within a run
+var floor_carry_items: Array[Dictionary] = []
+var floor_carry_equipped: Array[int] = []
+
+# Passive upgrades picked between floors
+var active_passives: Array[String] = []
+
+# Second wind — once-per-floor passive save
+var second_wind_used := false
+var iron_will_used   := false  # DWARF once-per-run takedown save
+
+# Persistent stats (saved to disk)
+var lifetime_gold       := 0
+var runs_completed      := 0
+var runs_attempted      := 0
+var best_rating         := ""
+var guild_rep           := 0
+var lifetime_takedowns  := 0
+var lifetime_alerts     := 0
+var ghost_runs          := 0   # completed with 0 alerts
+
+const GUILD_TIERS := [
+	{"rep": 0,   "title": "Street Rat",     "color": Color(0.55, 0.55, 0.55)},
+	{"rep": 10,  "title": "Guild Initiate", "color": Color(0.60, 0.85, 0.55)},
+	{"rep": 30,  "title": "Shadow Hand",    "color": Color(0.45, 0.65, 0.90)},
+	{"rep": 60,  "title": "Nightblade",     "color": Color(0.75, 0.40, 0.90)},
+	{"rep": 100, "title": "Master Thief",   "color": Color(0.95, 0.80, 0.20)},
+	{"rep": 150, "title": "Phantom",        "color": Color(0.95, 0.95, 1.00)},
+]
+
+func get_guild_tier() -> Dictionary:
+	var best: Dictionary = GUILD_TIERS[0]
+	for t in GUILD_TIERS:
+		if guild_rep >= t.rep:
+			best = t
+	return best
+
+const SAVE_PATH = "user://contraband_save.cfg"
+
+signal state_changed(new_state: State)
+signal screen_shake(intensity: float, duration: float)
+signal alert_triggered
+signal show_shop
+signal show_passive_pick
+signal reinforcement_incoming
+signal death_save_rolled(roll: int, survived: bool)
+
+func shake(intensity: float, duration: float):
+	screen_shake.emit(intensity, duration)
+
+# ── Race definitions ──────────────────────────────────────────────────────────
+const RACES := {
+	"HALFLING": {
+		"title":        "Halfling",
+		"passive_id":   "HALFLING_LUCKY",
+		"passive":      "Lucky — reroll any Nat 1. Naturally small; guards detect you 20% slower.",
+		"ability_name": "Lucky Break",
+		"ability_desc": "Once per floor, negate one alert for free.",
+		"flavor":       "The safest hands in the guild belong to the smallest thief.",
+		"color":        Color(0.85, 0.68, 0.30),
+		"skin":         Color(0.88, 0.72, 0.55),
+	},
+	"TIEFLING": {
+		"title":        "Tiefling",
+		"passive_id":   "TIEFLING_DARKVISION",
+		"passive":      "Darkvision — extinguished torches don't reduce your guard's vision. Hellish aura intimidates.",
+		"ability_name": "Hellish Rebuke",
+		"ability_desc": "When caught in vision, vanish from all detection bars instantly.",
+		"flavor":       "They fear what hides in the dark. I am what hides in the dark.",
+		"color":        Color(0.70, 0.20, 0.85),
+		"skin":         Color(0.40, 0.18, 0.55),
+	},
+	"WOOD_ELF": {
+		"title":        "Wood Elf",
+		"passive_id":   "ELF_TREAD",
+		"passive":      "Elven Tread — movement is always silent. Fey ancestry: immune to Gnoll scent.",
+		"ability_name": "Vanish",
+		"ability_desc": "Become invisible to all guards for 3 seconds.",
+		"flavor":       "A ghost in the underbrush. A whisper in the vault.",
+		"color":        Color(0.25, 0.75, 0.35),
+		"skin":         Color(0.75, 0.85, 0.65),
+	},
+	"DWARF": {
+		"title":        "Dwarf",
+		"passive_id":   "DWARF_IRON_WILL",
+		"passive":      "Iron Will — one failed takedown per run becomes a graze. Stonecunning: see traps before stepping.",
+		"ability_name": "Battle Cry",
+		"ability_desc": "Stun all adjacent guards for 2 seconds (they pause movement).",
+		"flavor":       "Aye, subtle as a cave-in. And twice as effective.",
+		"color":        Color(0.75, 0.55, 0.25),
+		"skin":         Color(0.70, 0.52, 0.38),
+	},
+}
+
+var selected_race := "HALFLING"
+
+const RACE_ORDER := ["HALFLING", "TIEFLING", "WOOD_ELF", "DWARF"]
+
+# ── Class definitions ──────────────────────────────────────────────────────────
+const CLASSES := {
+	"CUTPURSE": {
+		"title":   "Cutpurse",
+		"items":   [{"type": 0, "count": 4}, {"type": 1, "count": 1}],
+		"passive": "Walking is quiet. Coin range +50%. First item per floor is free (Sleight of Hand).",
+		"flavor":  "Gold has a way of finding my pockets.",
+		"color":   Color(0.95, 0.78, 0.15),
+	},
+	"SHADOWDANCER": {
+		"title":   "Shadowdancer",
+		"items":   [{"type": 1, "count": 2}, {"type": 3, "count": 1}],
+		"passive": "Sneak takedowns are silent (no dice) — 2 per floor. Third attempt wakes a guard.",
+		"flavor":  "Strike from where the light cannot follow.",
+		"color":   Color(0.55, 0.30, 0.95),
+	},
+	"ASSASSIN": {
+		"title":   "Assassin",
+		"items":   [{"type": 2, "count": 2}, {"type": 0, "count": 2}],
+		"passive": "d20 ≥ 6 succeeds. Misses on 4+. Frontal kills earn +120 gp. Mark ability: auto-execute.",
+		"flavor":  "Every guard a contract. Every contract fulfilled.",
+		"color":   Color(0.85, 0.15, 0.15),
+	},
+}
+
+# ── Challenge contracts (optional opt-in hard modes) ─────────────────────────
+const CHALLENGE_CONTRACTS := [
+	{"id": "PHANTOM_PROTOCOL", "name": "Phantom Protocol", "desc": "Trigger zero alerts across all 3 floors.", "bonus": 600},
+	{"id": "HIRED_BLADE",      "name": "Hired Blade",      "desc": "Take down 6 or more guards total.",        "bonus": 500},
+	{"id": "SPEED_DEMON",      "name": "Speed Demon",      "desc": "Escape all 3 floors in under 4 minutes.",  "bonus": 700},
+]
+
+var active_contract  := "NONE"
+var contract_name    := ""
+var contract_desc    := ""
+var contract_bonus   := 0
+
+var _insurance_used   := false
+var _racial_luck_used := false  # HALFLING one-per-floor alert negate
+var _vanish_active    := false  # WOOD_ELF invisibility
+var _vanish_timer     := 0.0
+var _stunned_guards: Array = []  # DWARF battle cry targets
+
+# ── Guild quartermaster NPCs ───────────────────────────────────────────────────
+const QUARTERMASTERS := [
+	"Tomas Halfwhistle", "Brynn Copperlock", "Sable Nightvane",
+	"Orrin Dustmantle", "Vex the Fence", "Mirela Coinshadow",
+]
+var quartermaster_name := ""
+
+# ── Story: The Broker's Game ──────────────────────────────────────────────────
+const BROKER_BRIEFINGS := {
+	"CUTPURSE": [
+		"The Vintner's Ledger is your first mark. Guard rotation changes at midnight — I've arranged it. Half the city's wealth passes through that cellar. I want the ledger. You keep whatever else you lift.",
+		"The barracks hold the Colonel's Signet behind three locks. Two are already open. The third is a guard named Greaves who drinks on shift. Don't kill him — he's useful to me.",
+		"The inner vault. The Archduke's Seal. This is what the first two jobs were for. Don't think about what it opens. Think about the number I'm paying you.",
+	],
+	"SHADOWDANCER": [
+		"A thief who dances with shadows — I appreciate the theatrics. The Ledger is buried in the cellar vault. The guards think it's routine inventory. It isn't. Don't let them realize that.",
+		"The Signet belongs to a Colonel who never removes it. Except he's no longer the Colonel. His replacement doesn't know what he's carrying. Make it clean.",
+		"Every shadow in that vault is yours tonight. The Seal sits in the inner sanctum. What it unseals — that's above your pay grade. I'll be generous if you don't ask.",
+	],
+	"ASSASSIN": [
+		"I don't need this quiet. I need it done. The Ledger is in the cellar vault. Leave anyone who isn't in your way. Anyone who is — well. That's why I hired you.",
+		"The Signet is on a chain around the neck of a man who probably deserves what he gets. The barracks are full. You've been in worse rooms.",
+		"The inner vault. The Seal. Three jobs, one purpose. Whatever it costs — consider it already paid. Get me that Seal.",
+	],
+	"ARCANIST": [
+		"A practitioner. Excellent. The wards in the cellar are mine — placed as insurance. They'll recognize your touch if you're careful. The Ledger is behind the second ward. Don't destroy what I've built.",
+		"The barracks have been warded since last month's incident. Someone else's work — sloppy. You'll see. The Signet is guarded by something that won't respond to mundane measures.",
+		"The inner vault is warded three deep. I designed two of them. The third is the Archduke's own work — older, angrier magic. The Seal is at the center. Bring it home and I'll tell you what it's for.",
+	],
+}
+
+const RELIC_REVEALS := {
+	1: "The Ledger wasn't inventory. It was a cipher — names, dates, payments. Half the city's magistrates appear in its pages. The Broker knew exactly what he was buying.",
+	2: "The Colonel's Signet bore an inscription in Old Dwarven: 'First Key.' You didn't know there were others. You do now.",
+	3: "The Archduke's Seal completed the set. Three keys to a vault beneath the city that hasn't been opened in forty years. Whatever's inside, The Broker waited a long time for it.",
+}
+
+const BROKER_SIGN_OFF := {
+	"PHANTOM THIEF": "The Broker's message arrived before you reached the safehouse: 'I knew you were the one.' The vault is open. You'll never know what was inside. The coin is real, though — and that's enough.",
+	"SHADOWBLADE":   "The Broker got what he wanted. You got paid. The city above goes on, none the wiser. For now.",
+	"SELLSWORD":     "The job is done. The trail you left will keep the city watch busy for a week. The Broker seemed pleased. You try not to think about what that means.",
+	"ROGUE":         "You made it out. Barely. The Broker has his relics. You have your coin and a collection of new enemies. Fair trade, probably.",
+}
+
+const QUARTERMASTER_REACTIONS := {
+	"low_heat": [
+		"You move like a ghost. I almost didn't hear you coming.",
+		"Clean work so far. Don't get cocky — the next floor's worse.",
+		"Still breathing. Good sign.",
+		"Quiet as a tomb. The guild approves.",
+	],
+	"high_heat": [
+		"You look like you've been through a war. The next floor won't be kinder.",
+		"Half the guard rotation's heard about you by now. Mind the patrols.",
+		"Loud work. Effective work. Barely.",
+		"They know your name down there. Keep that in mind.",
+	],
+	"race_HALFLING": [
+		"A halfling. Last one through here fleeced me for forty gold and I never noticed.",
+		"Small hands, light feet. Perfect for what's ahead.",
+		"The guild always trusts a halfling's fingers. I'm not sure we should.",
+	],
+	"race_TIEFLING": [
+		"Don't take this wrong, but the guards are going to notice you. Plan accordingly.",
+		"Your kind has a way of making guards nervous. That's not always a bad thing.",
+		"Those eyes cut right through a man. Useful, I imagine, in the dark.",
+	],
+	"race_WOOD_ELF": [
+		"Silent as a shadow and twice as dangerous. The guild speaks well of your kind.",
+		"An elf. The guards won't hear you coming — lucky them, not knowing.",
+		"A hundred years of patience. That's what I see. Use it.",
+	],
+	"race_DWARF": [
+		"A dwarf who steals for a living. The guild needs more like you — stubborn enough to finish.",
+		"Iron will and stone sense. You'll need both down there.",
+		"I've seen dwarves move quieter than they have any right to. Be one of them.",
+	],
+	"floor_1": [
+		"First floor's never the hard part. It's what comes after.",
+		"The cellars were just the door. Mind what's behind it.",
+	],
+	"floor_2": [
+		"The barracks don't forgive mistakes. Neither do I — your tab's still open.",
+		"Halfway through. The hard half is ahead.",
+		"You've come far enough that turning back would be stupid. So don't.",
+	],
+}
+
+func get_broker_briefing() -> String:
+	var pool: Array = BROKER_BRIEFINGS.get(selected_class, BROKER_BRIEFINGS.get("CUTPURSE", []))
+	if pool.is_empty():
+		return "The job is yours. Don't waste it."
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + current_floor * 2741
+	return pool[rng.randi() % pool.size()]
+
+func get_relic_reveal() -> String:
+	return RELIC_REVEALS.get(current_floor, "")
+
+func get_story_sign_off() -> String:
+	var rating := get_rating()
+	return BROKER_SIGN_OFF.get(rating, BROKER_SIGN_OFF.get("ROGUE", ""))
+
+func get_contextual_qm_line() -> String:
+	var lines: Array = []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + current_floor * 5381
+	if alert_escalation >= 3:
+		lines.append_array(QUARTERMASTER_REACTIONS["high_heat"])
+	else:
+		lines.append_array(QUARTERMASTER_REACTIONS["low_heat"])
+	var race_key := "race_" + selected_race
+	if QUARTERMASTER_REACTIONS.has(race_key):
+		lines.append_array(QUARTERMASTER_REACTIONS[race_key])
+	var floor_key := "floor_" + str(current_floor)
+	if QUARTERMASTER_REACTIONS.has(floor_key):
+		lines.append_array(QUARTERMASTER_REACTIONS[floor_key])
+	if lines.is_empty():
+		return "What'll it be?"
+	return lines[rng.randi() % lines.size()]
+
+# ── Mission briefings per floor ───────────────────────────────────────────────
+const MISSION_BRIEFS := {
+	1: [
+		"The cellars run deep beneath the merchant quarter. The ledger is somewhere in the vault alcove — the guards change shift at midnight.",
+		"Wine barrels, old debts, and one very important document. Get in, get the goods, get out before the hounds are fed.",
+		"Our client wants the vintner's ledger destroyed. Personally, I'll take the coin inside instead. You choose.",
+	],
+	2: [
+		"Barracks guards are jumpy tonight — word got out about the cellar job. Move quiet or move fast. Either works.",
+		"The signet is in the officer's quarters. The officer is... somewhere on patrol. Don't ask where he ends up.",
+		"Half these guards are drunk. The other half wish they were. This should be easy. It never is.",
+	],
+	3: [
+		"The inner vault. The guild has waited ten years for this contract. Don't embarrass us.",
+		"Archduke's seal. Three floors of guards. One thief. The odds are insulting. I've bet on worse.",
+		"Whatever you find in there — the guild takes forty percent. That's not negotiable. Neither are you. Go.",
+	],
+	4: [
+		"The inner sanctum. The Archduke's personal retinue doubles the guard count tonight. They know someone got through the vault.",
+		"Every door between you and the target has a Warden behind it. Wardens don't drink on the job. Pity.",
+		"The sanctum hasn't been breached in forty years. The Broker is counting on that streak ending tonight.",
+	],
+	5: [
+		"The throne room. The Archduke himself may be present. If he is — the Broker says not to complicate things. The Broker has never been inside.",
+		"This is the job all three floors were building toward. One artifact. One exit. Don't give them time to lock it down.",
+		"City Watch has been called in. This is what wanted level 5 looks like. Get the relic and get out — the city is awake.",
+	],
+}
+
+# ── Loot rarity ───────────────────────────────────────────────────────────────
+enum Rarity { COMMON, UNCOMMON, RARE }
+const RARITY_COLORS := {
+	Rarity.COMMON:   Color(0.70, 0.70, 0.70),
+	Rarity.UNCOMMON: Color(0.25, 0.85, 0.35),
+	Rarity.RARE:     Color(0.55, 0.30, 0.95),
+}
+const RARITY_NAMES := {
+	Rarity.COMMON:   "Common",
+	Rarity.UNCOMMON: "Uncommon",
+	Rarity.RARE:     "Rare",
+}
+
+# ── Run modifiers ──────────────────────────────────────────────────────────────
+const _MODIFIERS := [
+	{"id": "TIGHT_PATROLS",  "name": "Tight Patrols",   "desc": "All enemies move 35% faster."},
+	{"id": "UNDER_THE_MOON", "name": "Under the Moon",  "desc": "Guard vision range +30px."},
+	{"id": "HIGH_ALERT",     "name": "High Alert",      "desc": "All guards start suspicious."},
+	{"id": "THIN_WALLS",     "name": "Thin Walls",      "desc": "Noise carries +40px further."},
+	{"id": "BONUS_CONTRACT", "name": "Bonus Contract",  "desc": "All loot values +60%."},
+	{"id": "LUCKY_BREAK",    "name": "Lucky Break",     "desc": "+4 to all d20 rolls."},
+	{"id": "CURSED_DICE",    "name": "Cursed Dice",     "desc": "-3 to all d20 rolls. High stakes."},
+	{"id": "BLOOD_MONEY",    "name": "Blood Money",     "desc": "Each takedown earns 50 gp."},
+	{"id": "CRACKDOWN",      "name": "City Crackdown",  "desc": "Alerts do not de-escalate. Guards remember everything."},
+	{"id": "INFORMANT",      "name": "Informant",       "desc": "One civilian is a city spy. Eye contact triggers an alert."},
+	{"id": "CURSED_VAULT",   "name": "Cursed Vault",    "desc": "Primary loot is warded. Grabbing it triggers a nearby trap."},
+	{"id": "DOUBLE_OR_NOTHING","name":"Double or Nothing","desc": "All loot worth 2×. Getting caught ends the run immediately — no death save."},
+	{"id": "NONE",           "name": "Standard Job",    "desc": "No special conditions."},
+	{"id": "NONE",           "name": "Standard Job",    "desc": "No special conditions."},
+]
+
+# ── Floor complications (rolled fresh each floor) ─────────────────────────────
+const FLOOR_COMPLICATIONS := [
+	{"id": "SURGE",      "name": "Patrol Surge",    "desc": "An extra guard roams this floor."},
+	{"id": "DIM",        "name": "Lights Dim",      "desc": "Guard vision range cut by 25px."},
+	{"id": "LOCKDOWN",   "name": "On High Alert",   "desc": "All guards begin suspicious."},
+	{"id": "PARANOID",   "name": "Paranoid Guards", "desc": "Detection fills 40% faster."},
+	{"id": "BOUNTY",     "name": "Bounty Hunter",   "desc": "An extra hound stalks this floor."},
+	{"id": "WINDFALL",   "name": "Lucky Find",      "desc": "All loot worth +40% this floor."},
+	{"id": "SENTINEL",   "name": "Sentinel Posted", "desc": "A rotating sentinel guards the vault."},
+	{"id": "DRUNK_WATCH","name": "Off-Duty Watch",  "desc": "Guards move 25% slower and vision angle is narrowed."},
+	{"id": "FOG",        "name": "Evening Fog",     "desc": "Guard vision range cut by 40px but noise carries further."},
+	{"id": "CLEAR",      "name": "Clear Night",     "desc": "No complications — for now."},
+	{"id": "CLEAR",      "name": "Clear Night",     "desc": "No complications — for now."},
+	{"id": "CLEAR",      "name": "Clear Night",     "desc": "No complications — for now."},
+]
+
+# ── Floor objectives ──────────────────────────────────────────────────────────
+const FLOOR_OBJECTIVES := [
+	{"id": "GHOST",     "name": "Ghost Run",    "desc": "Trigger no alerts this floor.",    "bonus": 200},
+	{"id": "CLEAN",     "name": "Clean Hands",  "desc": "Take down no guards this floor.",  "bonus": 150},
+	{"id": "COLLECTOR", "name": "Full Haul",    "desc": "Collect every piece of loot.",     "bonus": 175},
+	{"id": "SPEEDRUN",  "name": "Rush Job",     "desc": "Exit within 90 seconds.",          "bonus": 225},
+	{"id": "NONE",      "name": "",             "desc": "",                                 "bonus": 0},
+	{"id": "NONE",      "name": "",             "desc": "",                                 "bonus": 0},
+]
+
+# Each floor has a pool of named targets; one is seeded per run
+const FLOOR_LOOT_POOL := {
+	1: [
+		{"name": "The Vintner's Ledger",      "desc": "A cipher disguised as inventory. Half the city's magistrates appear in its pages."},
+		{"name": "Lord Ashford's Charter",    "desc": "Proof of title to three city districts — and a forgery the guild can use."},
+		{"name": "The Customs Manifest",      "desc": "Someone paid very well to keep these imports off the books."},
+		{"name": "Magistrate Vane's Seal",    "desc": "An impression of her seal is worth more to the right buyer than the seal itself."},
+		{"name": "The Cellar Inventory",      "desc": "Not wine. The numbers don't add up — and the Broker wants to know why."},
+	],
+	2: [
+		{"name": "The Colonel's Signet",      "desc": "Inscribed in Old Dwarven: 'First Key.' You didn't know there were others."},
+		{"name": "Captain Greaves' Warrant",  "desc": "A signed arrest warrant — blank. Whoever holds this names their own enemy."},
+		{"name": "The Watch Commander's Ring","desc": "Proof of rank, proof of corruption. Both useful."},
+		{"name": "The Garrison Ledger",       "desc": "Payroll discrepancies going back six months. The Colonel is skimming."},
+		{"name": "The Iron Writ",             "desc": "A military contract that should not exist. The Broker's handwriting is on it."},
+	],
+	3: [
+		{"name": "The Archduke's Seal",       "desc": "Third of three keys. Whatever it opens has been locked for forty years."},
+		{"name": "The Bloodline Charter",     "desc": "It names an heir no one was meant to know about. The Broker's been patient."},
+		{"name": "The Vault Cipher",          "desc": "Not a document. A key. The lock is somewhere under the city."},
+		{"name": "The Archduke's Testament",  "desc": "Written the night before his disappearance. The guild has waited a long time for this."},
+		{"name": "The Final Manifesto",       "desc": "Three floors. Three fragments. This completes the set. The Broker will not explain why."},
+	],
+	4: [
+		{"name": "The Sanctum Keystone",      "desc": "A carved stone tablet — older than the building that holds it. The Broker paid a fortune for this address."},
+		{"name": "The Warden's Cipher",       "desc": "Encodes the location of three private vaults. The Broker's handwriting is in the margin."},
+		{"name": "The Black Ledger",          "desc": "Names, payments, debts. Every magistrate in the city is in here. So is the Broker."},
+		{"name": "The Archduke's Ring",       "desc": "His seal ring, worn on a chain, never removed in public. Tonight he removed it."},
+	],
+	5: [
+		{"name": "The Throne Relic",          "desc": "Whatever it is, it sat in the throne vault for forty years. The Broker has been planning this since before you were hired."},
+		{"name": "The Succession Document",   "desc": "It makes the current Archduke illegitimate. Three floors of guards were worth it."},
+		{"name": "The Crown Sapphire",        "desc": "Ceremonial. Priceless. The Broker wants it in a private collection by morning."},
+		{"name": "The Grand Compact",         "desc": "A treaty signed by four noble houses. Whoever holds it controls the city's next decade."},
+	],
+}
+
+# Set at run start from pool
+var floor_loot_name := ""
+var floor_loot_desc := ""
+
+func pick_floor_loot_name():
+	var pool: Array = FLOOR_LOOT_POOL.get(current_floor, [{"name": "Stolen Goods", "desc": "Worth something to someone."}])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + current_floor * 4999
+	var entry: Dictionary = pool[rng.randi() % pool.size()]
+	floor_loot_name = entry.name
+	floor_loot_desc = entry.desc
+
+# ── Passive upgrades ──────────────────────────────────────────────────────────
+const PASSIVES := [
+	{"id": "SOFT_BOOTS",    "name": "Soft Boots",      "desc": "Walking always counts as quiet movement.",       "color": Color(0.60, 0.85, 0.95)},
+	{"id": "GHOST_STEP",    "name": "Ghost Step",      "desc": "Sneaking produces absolutely no noise.",         "color": Color(0.70, 0.90, 1.00)},
+	{"id": "IRON_NERVES",   "name": "Iron Nerves",     "desc": "+2 bonus to all d20 rolls.",                     "color": Color(0.95, 0.75, 0.20)},
+	{"id": "PICKPOCKET",    "name": "Pickpocket",      "desc": "Each takedown yields +35 gp.",                   "color": Color(0.95, 0.80, 0.10)},
+	{"id": "QUICK_HANDS",   "name": "Quick Hands",     "desc": "Movement cooldown reduced by 20%.",              "color": Color(0.95, 0.55, 0.20)},
+	{"id": "DARK_SHROUD",   "name": "Dark Shroud",     "desc": "Guards detect you 30% slower while sneaking.",   "color": Color(0.45, 0.30, 0.75)},
+	{"id": "ASSASSINS_EYE", "name": "Assassin's Eye",  "desc": "Frontal d20 takedowns succeed on 10+.",          "color": Color(0.85, 0.15, 0.15)},
+	{"id": "FENCE_CONTACT", "name": "Fence Contact",   "desc": "Shop items cost 20% less.",                      "color": Color(0.95, 0.80, 0.40)},
+	{"id": "SECOND_WIND",   "name": "Second Wind",     "desc": "First failed takedown per floor becomes a graze.", "color": Color(0.30, 0.80, 0.55)},
+	{"id": "SHADOW_CLOAK",  "name": "Shadow Cloak",    "desc": "Hiding in a barrel also silences all noise.",    "color": Color(0.35, 0.25, 0.60)},
+	{"id": "DEAD_WEIGHT",   "name": "Dead Weight",     "desc": "Carrying bodies doesn't slow your movement.",    "color": Color(0.55, 0.55, 0.55)},
+	{"id": "COLD_BLOOD",    "name": "Cold Blood",      "desc": "Class ability cooldowns reduced by 30%.",        "color": Color(0.30, 0.75, 0.90)},
+	{"id": "LOCKSMITH",     "name": "Locksmith",       "desc": "Smoke grenades last 50% longer.",                "color": Color(0.45, 0.85, 0.55)},
+	{"id": "INSURANCE",     "name": "Insurance",       "desc": "One alert per floor costs no escalation.",       "color": Color(0.85, 0.70, 0.30)},
+	{"id": "SCAVENGER",     "name": "Scavenger",       "desc": "Floor item pickups give 1 extra item.",          "color": Color(0.70, 0.55, 0.35)},
+]
+
+# ── Guild reputation unlocks ──────────────────────────────────────────────────
+const GUILD_UNLOCKS := [
+	{"rep": 10,  "id": "GUILD_MARK",    "name": "Guild Mark",    "desc": "Start each floor with a 50 gp bonus."},
+	{"rep": 30,  "id": "FENCE_NETWORK", "name": "Fence Network", "desc": "All shop items cost 15% less."},
+	{"rep": 60,  "id": "SAFECRACKER",   "name": "Safecracker",   "desc": "Bonus loot yields +50% gold."},
+	{"rep": 100, "id": "SHADOW_GUILD",  "name": "Shadow Guild",  "desc": "Detection fills 20% slower always."},
+	{"rep": 150, "id": "MASTERTHIEF",   "name": "Master Thief",  "desc": "Natural 1 on d20 is treated as 5."},
+]
+
+# ── Weapons (3 tiers per class + universal finds) ────────────────────────────
+# tags: any of "shadow","silent","piercing","ranged","throwable","heavy","cursed"
+const WEAPONS := {
+	# ── Cutpurse line ────────────────────────────────────────────────────────
+	"SHIV": {
+		"name": "Shiv",            "class": "CUTPURSE",  "tier": 1,
+		"tags": ["piercing","throwable"],
+		"desc": "+2 to rear takedowns. Throw once per floor for a silent 80px kill.",
+		"color": Color(0.65, 0.65, 0.70),
+	},
+	"STILETTO": {
+		"name": "Stiletto",        "class": "CUTPURSE",  "tier": 2,
+		"tags": ["piercing","silent","throwable"],
+		"desc": "Rear takedowns always silent. Throw up to 2×/floor. +3 vs unaware.",
+		"color": Color(0.80, 0.78, 0.85),
+	},
+	"ASSASSIN_FANG": {
+		"name": "Assassin's Fang", "class": "CUTPURSE",  "tier": 3,
+		"tags": ["piercing","silent","throwable","shadow"],
+		"desc": "All takedowns count as rear. Throw ignores detection bar. Nat-1 becomes 5.",
+		"color": Color(0.55, 0.30, 0.95),
+	},
+	# ── Shadowdancer line ────────────────────────────────────────────────────
+	"SHADOW_BLADE": {
+		"name": "Shadow Blade",    "class": "SHADOWDANCER", "tier": 1,
+		"tags": ["shadow","silent"],
+		"desc": "Sneak takedowns always silent. Backstab from full darkness skips d20.",
+		"color": Color(0.50, 0.25, 0.85),
+	},
+	"GHOST_BLADE": {
+		"name": "Ghost Blade",     "class": "SHADOWDANCER", "tier": 2,
+		"tags": ["shadow","silent","piercing"],
+		"desc": "No noise on any takedown. 3 phantom strikes/floor skip d20 regardless of light.",
+		"color": Color(0.65, 0.40, 1.00),
+	},
+	"VOID_REAPER": {
+		"name": "Void Reaper",     "class": "SHADOWDANCER", "tier": 3,
+		"tags": ["shadow","silent","piercing","cursed"],
+		"desc": "Takedowns erase the body. 5 phantom strikes/floor. Souls fuel detection drain.",
+		"color": Color(0.35, 0.10, 0.70),
+	},
+	# ── Assassin line ────────────────────────────────────────────────────────
+	"CROSSBOW": {
+		"name": "Hand Crossbow",   "class": "ASSASSIN",  "tier": 1,
+		"tags": ["ranged","piercing"],
+		"desc": "200px ranged takedown. Loud unless silenced. 3 bolts per floor.",
+		"color": Color(0.55, 0.38, 0.22),
+	},
+	"REPEATING_CROSSBOW": {
+		"name": "Repeating Crossbow", "class": "ASSASSIN", "tier": 2,
+		"tags": ["ranged","piercing"],
+		"desc": "5 bolts/floor. 250px range. Reload is silent. NAT20 pierces two guards.",
+		"color": Color(0.70, 0.50, 0.28),
+	},
+	"SILENT_BOLT": {
+		"name": "Silenced Arbalest", "class": "ASSASSIN", "tier": 3,
+		"tags": ["ranged","piercing","silent"],
+		"desc": "Unlimited silent bolts. 300px range. Every kill resets detection bar on nearby guards.",
+		"color": Color(0.85, 0.65, 0.35),
+	},
+	# ── Universal found weapons (any class, penalty if wrong class) ──────────
+	"GARROTE": {
+		"name": "Garrote Wire",    "class": "",  "tier": 2,
+		"tags": ["silent","heavy"],
+		"desc": "From behind: always silent kill, no dice. Frontal: -4 penalty. Requires 2s hold.",
+		"color": Color(0.72, 0.68, 0.60),
+	},
+	"VENOM_NEEDLE": {
+		"name": "Venom Needle",    "class": "",  "tier": 2,
+		"tags": ["piercing","silent","throwable"],
+		"desc": "120px throw: target stumbles (confused 6s) then falls silently. 2 uses.",
+		"color": Color(0.30, 0.75, 0.35),
+	},
+	"RUNED_BLADE": {
+		"name": "Runed Blade",     "class": "",  "tier": 3,
+		"tags": ["shadow","piercing","cursed"],
+		"desc": "Kills charge the rune. 3 charges = free shadow step (teleport to shadow). Cursed: -1 HP/floor.",
+		"color": Color(0.50, 0.20, 0.80),
+	},
+	"SMOKE_BLADE": {
+		"name": "Smoke Blade", "class": "", "tier": 2,
+		"tags": ["silent", "shadow"],
+		"desc": "Silent kills release a 3s smoke cloud at target position. Great for chain takedowns.",
+		"color": Color(0.55, 0.75, 0.65),
+	},
+	"WAR_PICK": {
+		"name": "War Pick", "class": "", "tier": 1,
+		"tags": ["heavy", "piercing"],
+		"desc": "High damage, loud. Breaks guard armor: target is -4 to detect you for 8s after kill.",
+		"color": Color(0.70, 0.55, 0.30),
+	},
+	"NONE": {
+		"name": "Unarmed",  "class": "", "tier": 0,
+		"tags": [],
+		"desc": "No weapon equipped.",
+		"color": Color(0.45, 0.45, 0.45),
+	},
+	# ── Sellsword line ───────────────────────────────────────────────────────
+	"LONGSWORD": {
+		"name": "Longsword",       "class": "SELLSWORD", "tier": 1,
+		"tags": ["heavy"],
+		"desc": "Wide slash attack. Makes noise but hits multiple enemies in arc.",
+		"color": Color(0.80, 0.75, 0.55),
+	},
+	"BROADSWORD": {
+		"name": "Broadsword",      "class": "SELLSWORD", "tier": 2,
+		"tags": ["heavy","piercing"],
+		"desc": "Heavier slash. NAT20 staggers nearby enemies. +1 damage vs armored guards.",
+		"color": Color(0.90, 0.82, 0.60),
+	},
+	"BLADESONG": {
+		"name": "Bladesong",       "class": "SELLSWORD", "tier": 3,
+		"tags": ["heavy","shadow"],
+		"desc": "Enchanted blade. Slash silenced in shadow. NAT20 splits into two arcs.",
+		"color": Color(0.65, 0.85, 1.00),
+	},
+	# ── Universal found weapons (continued) ──────────────────────────────────
+	"SPEAR": {
+		"name": "Boar Spear",      "class": "", "tier": 2,
+		"tags": ["heavy","piercing"],
+		"desc": "Long thrust: hits 2 tiles ahead. Guards in a line take full damage.",
+		"color": Color(0.72, 0.60, 0.35),
+	},
+	"WAND": {
+		"name": "Wand of Force",   "class": "", "tier": 2,
+		"tags": ["ranged","cursed"],
+		"desc": "Fires a slow magical orb. Silent but unpredictable. 5 charges per floor.",
+		"color": Color(0.55, 0.30, 0.95),
+	},
+}
+
+const CLASS_WEAPONS := {
+	"CUTPURSE":     "SHIV",
+	"SHADOWDANCER": "SHADOW_BLADE",
+	"ASSASSIN":     "CROSSBOW",
+	"SELLSWORD":    "LONGSWORD",
+}
+
+# Weapon upgrade path (tier 1→2→3 per class)
+const WEAPON_UPGRADES := {
+	"SHIV":               "STILETTO",
+	"STILETTO":           "ASSASSIN_FANG",
+	"SHADOW_BLADE":       "GHOST_BLADE",
+	"GHOST_BLADE":        "VOID_REAPER",
+	"CROSSBOW":           "REPEATING_CROSSBOW",
+	"REPEATING_CROSSBOW": "SILENT_BOLT",
+	"WAR_PICK":           "RUNED_BLADE",
+	"LONGSWORD":          "BROADSWORD",
+	"BROADSWORD":         "BLADESONG",
+}
+
+# Combat data: shape, damage per hit, cooldown (s), noise radius (px)
+# shapes: "jab" (1-tile), "slash" (3-wide fan), "thrust" (2-tile line), "bolt" (raycast), "orb" (projectile)
+const WEAPON_COMBAT := {
+	"NONE":               {"shape": "jab",    "damage": 1, "cooldown": 0.55, "noise_r":  60.0},
+	"SHIV":               {"shape": "jab",    "damage": 1, "cooldown": 0.28, "noise_r":   0.0},
+	"STILETTO":           {"shape": "jab",    "damage": 1, "cooldown": 0.25, "noise_r":   0.0},
+	"ASSASSIN_FANG":      {"shape": "jab",    "damage": 2, "cooldown": 0.22, "noise_r":   0.0},
+	"SHADOW_BLADE":       {"shape": "slash",  "damage": 1, "cooldown": 0.40, "noise_r":   0.0},
+	"GHOST_BLADE":        {"shape": "slash",  "damage": 1, "cooldown": 0.38, "noise_r":   0.0},
+	"VOID_REAPER":        {"shape": "slash",  "damage": 2, "cooldown": 0.36, "noise_r":   0.0},
+	"CROSSBOW":           {"shape": "bolt",   "damage": 2, "cooldown": 1.20, "noise_r": 140.0},
+	"REPEATING_CROSSBOW": {"shape": "bolt",   "damage": 1, "cooldown": 0.65, "noise_r": 120.0},
+	"SILENT_BOLT":        {"shape": "bolt",   "damage": 1, "cooldown": 0.80, "noise_r":   0.0},
+	"GARROTE":            {"shape": "jab",    "damage": 2, "cooldown": 0.60, "noise_r":   0.0},
+	"VENOM_NEEDLE":       {"shape": "bolt",   "damage": 1, "cooldown": 0.50, "noise_r":   0.0},
+	"RUNED_BLADE":        {"shape": "slash",  "damage": 2, "cooldown": 0.42, "noise_r":  60.0},
+	"SMOKE_BLADE":        {"shape": "slash",  "damage": 1, "cooldown": 0.40, "noise_r":   0.0},
+	"WAR_PICK":           {"shape": "slash",  "damage": 2, "cooldown": 0.55, "noise_r": 140.0},
+	"LONGSWORD":          {"shape": "slash",  "damage": 2, "cooldown": 0.45, "noise_r":  80.0},
+	"BROADSWORD":         {"shape": "slash",  "damage": 3, "cooldown": 0.52, "noise_r": 100.0},
+	"BLADESONG":          {"shape": "slash",  "damage": 3, "cooldown": 0.48, "noise_r":  40.0},
+	"SPEAR":              {"shape": "thrust", "damage": 2, "cooldown": 0.60, "noise_r":  80.0},
+	"WAND":               {"shape": "orb",    "damage": 1, "cooldown": 0.80, "noise_r":   0.0},
+}
+
+var floor_carry_weapon := "NONE"
+var _runed_blade_charges := 0  # RUNED_BLADE rune counter
+var _venom_needle_uses   := 2  # per floor
+var _wand_charges        := 5  # per floor
+
+const FLOOR_WEAPON_POOL := {
+	1: ["GARROTE", "WAR_PICK", "SPEAR"],
+	2: ["GARROTE", "VENOM_NEEDLE", "SMOKE_BLADE", "WAR_PICK", "SPEAR"],
+	3: ["VENOM_NEEDLE", "SMOKE_BLADE", "RUNED_BLADE", "WAND"],
+	4: ["RUNED_BLADE", "SMOKE_BLADE", "WAND"],
+	5: ["RUNED_BLADE", "WAND"],
+}
+
+func get_floor_weapon_drops(floor_num: int) -> Array:
+	var pool: Array = FLOOR_WEAPON_POOL.get(floor_num, ["GARROTE"])
+	var count: int = 1 if floor_num <= 2 else 2
+	var result: Array = []
+	var shuffled: Array = pool.duplicate()
+	shuffled.shuffle()
+	for i in range(mini(count, shuffled.size())):
+		result.append(shuffled[i])
+	return result
+
+# ── Gear (5 slots: weapon-upgrade, off-hand, boots, cloak, trinket) ─────────
+# "set" key groups items for set-bonus detection
+const GEAR := {
+	# Boots
+	"LEATHER_BOOTS":   { "slot": "boots",   "name": "Soft Leather Boots",  "cost": 55,
+		"desc": "Movement noise -25%.",     "set": "thief",
+		"tags": ["stealth"], "effect": "QUIET_BOOTS", "color": Color(0.65, 0.48, 0.28), "rarity": 0 },
+	"SHADOWSTEP_BOOTS":{ "slot": "boots",   "name": "Shadowstep Boots",    "cost": 120,
+		"desc": "Sneaking is always perfectly silent.", "set": "shadow",
+		"tags": ["stealth","shadow"], "effect": "GHOST_BOOTS", "color": Color(0.35, 0.25, 0.60), "rarity": 1 },
+	"IRONSHOD_BOOTS":  { "slot": "boots",   "name": "Ironshod Boots",      "cost": 70,
+		"desc": "Glass tiles don't shatter. -1 on all stealth rolls.", "set": "iron",
+		"tags": ["heavy"], "effect": "GLASS_IMMUNE", "color": Color(0.55, 0.55, 0.60), "rarity": 0 },
+	# Cloaks
+	"SHADOW_CLOAK":    { "slot": "cloak",   "name": "Shadow Cloak",        "cost": 90,
+		"desc": "Detection rate -30% while sneaking.",   "set": "shadow",
+		"tags": ["stealth","shadow"], "effect": "SLOW_DETECT_SNEAK", "color": Color(0.30, 0.20, 0.55), "rarity": 1 },
+	"SILK_MANTLE":     { "slot": "cloak",   "name": "Silk Mantle",         "cost": 65,
+		"desc": "Walking noise counts as quiet.",        "set": "thief",
+		"tags": ["stealth"], "effect": "SOFT_WALK", "color": Color(0.55, 0.45, 0.75), "rarity": 0 },
+	"DUSTCLOAK":       { "slot": "cloak",   "name": "Dustcloak",           "cost": 80,
+		"desc": "After hiding, detection bar resets 2× faster when you move.", "set": "shadow",
+		"tags": ["stealth","shadow"], "effect": "FAST_RESET", "color": Color(0.40, 0.32, 0.22), "rarity": 1 },
+	"WARDED_MANTLE":   { "slot": "cloak",   "name": "Warded Mantle",       "cost": 105,
+		"desc": "First magic trap/ward each floor deals no penalty.", "set": "iron",
+		"tags": ["heavy","magic"], "effect": "WARD_RESIST", "color": Color(0.35, 0.50, 0.70), "rarity": 2 },
+	# Off-hand (Shadowdancer primary; others get small benefit)
+	"PARRYING_DAGGER": { "slot": "offhand", "name": "Parrying Dagger",     "cost": 85,
+		"desc": "Failed takedowns become grazes (no alarm). Shadowdancer: +1 silent strike/floor.", "set": "thief",
+		"tags": ["piercing","silent"], "effect": "PARRY", "color": Color(0.70, 0.70, 0.78), "rarity": 1 },
+	"SMOKE_CANISTER":  { "slot": "offhand", "name": "Smoke Canister",      "cost": 95,
+		"desc": "Passively: smoke bombs last 60% longer. Active: instant mini-smoke (1 use).", "set": "shadow",
+		"tags": ["stealth","utility"], "effect": "EXTENDED_SMOKE", "color": Color(0.42, 0.58, 0.42), "rarity": 1 },
+	"LOCKPICK_KIT":    { "slot": "offhand", "name": "Lockpick Kit",        "cost": 75,
+		"desc": "Doors and chests: no item needed. +4 to all lock/trap d20 checks.", "set": "thief",
+		"tags": ["utility"], "effect": "LOCKPICK", "color": Color(0.70, 0.55, 0.28), "rarity": 1 },
+	# Trinkets (unlocked at guild rep 30)
+	"THIEVES_TOOLS":   { "slot": "trinket", "name": "Thieves' Tools",      "cost": 100,
+		"desc": "Disarm traps and wards silently without using an item.",  "set": "thief",
+		"tags": ["utility","stealth"], "effect": "DISARM_TOOL", "color": Color(0.70, 0.55, 0.28), "rarity": 1 },
+	"DEADWEIGHT_HARNESS":{ "slot": "trinket","name": "Deadweight Harness", "cost": 80,
+		"desc": "Carrying bodies doesn't slow movement.",  "set": "iron",
+		"tags": ["heavy"], "effect": "BODY_CARRY", "color": Color(0.50, 0.50, 0.50), "rarity": 0 },
+	"QUICKSILVER_FLASK":{ "slot": "trinket","name": "Quicksilver Flask",   "cost": 110,
+		"desc": "Activate for 8s movement speed boost (once per floor).",  "set": "shadow",
+		"tags": ["stealth","utility"], "effect": "SPEED_BURST", "color": Color(0.55, 0.85, 0.95), "rarity": 1 },
+	"BLOOD_VIAL":      { "slot": "trinket", "name": "Blood Vial",          "cost": 90,
+		"desc": "Heals bleeding on use. Passively: bleeding deals half noise.", "set": "iron",
+		"tags": ["utility","heavy"], "effect": "BLEED_RESIST", "color": Color(0.80, 0.25, 0.25), "rarity": 1 },
+	"SHADOWGLASS":     { "slot": "trinket", "name": "Shadowglass Lens",    "cost": 130,
+		"desc": "See guard patrol paths as faint trails on the map. +1 to all stealth rolls.", "set": "shadow",
+		"tags": ["stealth","shadow"], "effect": "PATROL_SIGHT", "color": Color(0.25, 0.55, 0.85), "rarity": 2 },
+}
+
+# ── Set bonuses ───────────────────────────────────────────────────────────────
+# Requires 3+ items with matching "set" key
+const SET_BONUSES := {
+	"shadow": {
+		"name": "Shadow Sovereign",
+		"desc": "Breaking line-of-sight resets detection bar instantly. Ghost on smoke.",
+		"effect": "SET_SHADOW",
+		"color": Color(0.55, 0.25, 0.90),
+	},
+	"thief": {
+		"name": "Master Thief",
+		"desc": "All d20 rolls gain +3. Noise from walking eliminated while sneaking.",
+		"effect": "SET_THIEF",
+		"color": Color(0.90, 0.75, 0.20),
+	},
+	"iron": {
+		"name": "Iron Resolve",
+		"desc": "Body discovery window +6s. Failed takedowns never trigger alert (once/floor).",
+		"effect": "SET_IRON",
+		"color": Color(0.65, 0.65, 0.70),
+	},
+}
+
+func get_active_set_bonus(gear: Dictionary, weapon_id: String) -> String:
+	var counts: Dictionary = {"shadow": 0, "thief": 0, "iron": 0}
+	for slot in gear:
+		var gid: String = gear[slot]
+		if not gid.is_empty():
+			var s: String = GEAR.get(gid, {}).get("set", "")
+			if s in counts:
+				counts[s] += 1
+	# Weapon tags also count toward shadow set
+	var wtags: Array = WEAPONS.get(weapon_id, {}).get("tags", [])
+	if "shadow" in wtags: counts["shadow"] += 1
+	if "piercing" in wtags or "silent" in wtags: counts["thief"] += 1
+	for s in counts:
+		if counts[s] >= 3:
+			return SET_BONUSES[s].get("effect", "")
+	return ""
+
+var floor_carry_gear: Dictionary = { "boots": "", "cloak": "", "offhand": "", "trinket": "" }
+
+# ── Between-floor shop ────────────────────────────────────────────────────────
+var floor_shop_items: Array = []  # 3 items rolled per floor visit
+
+func roll_floor_shop():
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + current_floor * 9973
+	floor_shop_items.clear()
+
+	# Slot 0: random consumable item
+	var item_pool := SHOP_ITEMS.duplicate()
+	if not item_pool.is_empty():
+		var idx: int = rng.randi() % item_pool.size()
+		floor_shop_items.append(item_pool[idx])
+		item_pool.remove_at(idx)
+
+	# Slot 1: weapon upgrade (if available) or second consumable
+	var upgrade_id: String = WEAPON_UPGRADES.get(floor_carry_weapon, "")
+	if upgrade_id != "":
+		var wdata: Dictionary = WEAPONS.get(upgrade_id, {})
+		var upgrade_cost: int = 120 + int(wdata.get("tier", 2)) * 40
+		floor_shop_items.append({
+			"name":       wdata.get("name", upgrade_id),
+			"type":       -2,                               # -2 = weapon upgrade
+			"weapon_id":  upgrade_id,
+			"cost":       upgrade_cost,
+			"desc":       wdata.get("desc", ""),
+			"color":      wdata.get("color", Color(0.8, 0.7, 0.3)),
+			"count":      1,
+		})
+	elif not item_pool.is_empty():
+		var idx: int = rng.randi() % item_pool.size()
+		floor_shop_items.append(item_pool[idx])
+
+	# Slot 2: guaranteed gear card (filter by trinket unlock if needed)
+	var gear_pool: Array = []
+	for gid in GEAR:
+		var gdata: Dictionary = GEAR[gid]
+		var slot: String = gdata.get("slot", "")
+		if floor_carry_gear.get(slot, "") == gid:
+			continue
+		if slot == "trinket" and guild_rep < 30:
+			continue
+		gear_pool.append(gid)
+	if not gear_pool.is_empty():
+		var gidx: int = rng.randi() % gear_pool.size()
+		var chosen_gid: String = gear_pool[gidx]
+		var gdata: Dictionary = GEAR[chosen_gid]
+		floor_shop_items.append({
+			"name":      gdata.get("name", chosen_gid),
+			"type":      -1,                               # -1 = gear, not consumable
+			"gear_id":   chosen_gid,
+			"gear_slot": gdata.get("slot", ""),
+			"cost":      gdata.get("cost", 80),
+			"desc":      gdata.get("desc", ""),
+			"color":     gdata.get("color", Color(0.6, 0.6, 0.6)),
+			"count":     1,
+		})
+
+const SHOP_ITEMS := [
+	{"name": "Alch. Smoke",     "type": 1, "count": 1, "cost": 50,  "desc": "Blinds guards in an area",               "tags": ["STEALTH", "UTILITY"]},
+	{"name": "Sopor. Dart",     "type": 2, "count": 1, "cost": 80,  "desc": "Silent 150px ranged takedown",           "tags": ["COMBAT",  "STEALTH"]},
+	{"name": "Silk Rope",       "type": 3, "count": 1, "cost": 60,  "desc": "Dash 3 tiles in facing dir.",            "tags": ["UTILITY", "STEALTH"]},
+	{"name": "Coin Pouch",      "type": 0, "count": 3, "cost": 35,  "desc": "3 distraction coins + bribe currency",   "tags": ["UTILITY"]},
+	{"name": "Flash Powder",    "type": 4, "count": 1, "cost": 75,  "desc": "Blinds nearby guards, resets detection", "tags": ["STEALTH", "UTILITY"]},
+	{"name": "Hold Person",     "type": 5, "count": 1, "cost": 90,  "desc": "Freeze one guard for 4 seconds",         "tags": ["COMBAT",  "UTILITY"]},
+	{"name": "Silence Scroll",  "type": 6, "count": 1, "cost": 85,  "desc": "Area of magical silence — 8 seconds",   "tags": ["STEALTH"]},
+	{"name": "Thieves' Tools",  "type": 7, "count": 1, "cost": 65,  "desc": "+5 to lockpick rolls this floor",        "tags": ["UTILITY", "STEALTH"]},
+	{"name": "Shadow Cloak Oil","type": 8, "count": 1, "cost": 100, "desc": "Guard vision range -20px for 60 sec",    "tags": ["STEALTH"]},
+	{"name": "Healer's Salve",  "type": -3,"count": 1, "cost": 70,  "desc": "Cures bleeding and limping.",            "tags": ["UTILITY"]},
+]
+
+const ITEM_SYNERGIES := [
+	{"tags": ["STEALTH", "STEALTH"], "text": "Ghost Protocol: +2 to all d20 rolls this floor"},
+	{"tags": ["COMBAT",  "UTILITY"], "text": "Enforcer: takedown gold bonus +50gp"},
+	{"tags": ["STEALTH", "UTILITY"], "text": "Shadow Prep: smoke duration +30%"},
+]
+
+func get_owned_synergies(player_items: Array) -> Array[String]:
+	var owned_tags: Array[String] = []
+	for item in player_items:
+		var itype: int = item.get("type", -1)
+		for si in SHOP_ITEMS:
+			if si.type == itype:
+				for t in si.tags:
+					owned_tags.append(t)
+	var result: Array[String] = []
+	for syn in ITEM_SYNERGIES:
+		var needed: Array = syn.tags.duplicate()
+		var check := owned_tags.duplicate()
+		var matched := true
+		for need in needed:
+			var idx: int = check.find(need)
+			if idx == -1:
+				matched = false; break
+			check.remove_at(idx)
+		if matched and not (syn.text in result):
+			result.append(syn.text)
+	return result
+
+func check_contract_complete() -> bool:
+	match active_contract:
+		"PHANTOM_PROTOCOL": return times_alerted == 0
+		"HIRED_BLADE":      return takedowns >= 6
+		"SPEED_DEMON":      return run_time <= 240.0
+	return false
+
+func pick_modifier() -> Dictionary:
+	run_seed = randi()
+	var m = _MODIFIERS[randi() % _MODIFIERS.size()]
+	run_modifier  = m.id
+	modifier_name = m.name
+	modifier_desc = m.desc
+	return m
+
+func pick_floor_complication() -> Dictionary:
+	var c = FLOOR_COMPLICATIONS[randi() % FLOOR_COMPLICATIONS.size()]
+	floor_complication = c.id
+	complication_name  = c.name
+	complication_desc  = c.desc
+	pick_floor_loot_name()
+	return c
+
+func pick_floor_objective() -> Dictionary:
+	var o = FLOOR_OBJECTIVES[randi() % FLOOR_OBJECTIVES.size()]
+	floor_objective      = o.id
+	floor_objective_name = o.name
+	floor_objective_desc = o.desc
+	floor_objective_bonus = o.bonus
+	return o
+
+func check_objective_complete() -> bool:
+	match floor_objective:
+		"GHOST":     return floor_alerts == 0
+		"CLEAN":     return floor_takedowns == 0
+		"COLLECTOR": return floor_bonus_collected
+		"SPEEDRUN":  return run_time - _floor_start_time <= 90.0
+	return false
+
+func get_main_loot_name() -> String:
+	return floor_loot_name if floor_loot_name != "" else "Stolen Goods"
+
+func get_main_loot_desc() -> String:
+	return floor_loot_desc if floor_loot_desc != "" else "Worth something to someone."
+
+func gold_available() -> int:
+	return gold_collected - gold_spent
+
+func get_shop_cost_multiplier() -> float:
+	var mult := 1.0
+	if has_passive("FENCE_CONTACT"):
+		mult *= 0.80
+	if get_guild_unlock("FENCE_NETWORK"):
+		mult *= 0.85
+	mult *= get_wanted_price_mult()
+	return mult
+
+# ── Passive system ────────────────────────────────────────────────────────────
+func has_passive(id: String) -> bool:
+	return id in active_passives
+
+func has_racial(id: String) -> bool:
+	var race: Dictionary = RACES.get(selected_race, {})
+	return race.get("passive_id", "") == id
+
+func get_mission_brief() -> String:
+	var pool: Array = MISSION_BRIEFS.get(current_floor, ["The job is yours. Make it count."])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + current_floor * 1337
+	return pool[rng.randi() % pool.size()]
+
+func get_d20_bonus() -> int:
+	var b := 0
+	if run_modifier == "LUCKY_BREAK": b += 4
+	if run_modifier == "CURSED_DICE": b -= 3
+	if has_passive("IRON_NERVES"):    b += 2
+	return b
+
+func roll_d20() -> int:
+	return clampi(randi_range(1, 20) + get_d20_bonus(), 1, 20)
+
+func roll_death_save() -> int:
+	return randi_range(1, 20)
+
+# Boss tracking
+var boss_alive := true
+var boss_name  := ""
+const BOSS_NAMES := [
+	"Archduke Corvallen", "Lord-Warden Ashcroft", "High Constable Vayne",
+	"Magister Durn", "Chancellor Ireth",
+]
+func pick_boss_name():
+	var rng := RandomNumberGenerator.new()
+	rng.seed = run_seed + 9973
+	boss_name = BOSS_NAMES[rng.randi() % BOSS_NAMES.size()]
+func record_boss_kill():
+	boss_alive = false
+	add_gold(300)
+	record_takedown(true)
+
+func try_use_racial_luck() -> bool:
+	if selected_race == "HALFLING" and not _racial_luck_used:
+		_racial_luck_used = true
+		return true
+	return false
+
+func apply_racial_passives():
+	match selected_race:
+		"HALFLING":
+			if not has_passive("DARK_SHROUD"):  # detect 20% slower
+				active_passives.append("HALFLING_SLOW_DETECT")
+		"WOOD_ELF":
+			if not has_passive("GHOST_STEP"):
+				active_passives.append("ELF_TREAD")
+
+func add_passive(id: String):
+	if not has_passive(id):
+		active_passives.append(id)
+
+func roll_passive_choices() -> Array:
+	var pool: Array = []
+	for p in PASSIVES:
+		if not (p.id in active_passives):
+			pool.append(p)
+	pool.shuffle()
+	return pool.slice(0, min(3, pool.size()))
+
+# ── Guild reputation ──────────────────────────────────────────────────────────
+func get_guild_unlock(id: String) -> bool:
+	for u in GUILD_UNLOCKS:
+		if u.id == id:
+			return guild_rep >= u.rep
+	return false
+
+func get_next_guild_unlock() -> Dictionary:
+	for u in GUILD_UNLOCKS:
+		if guild_rep < u.rep:
+			return u
+	return {}
+
+func get_pending_rep_gain() -> int:
+	match get_rating():
+		"PHANTOM THIEF": return 10
+		"SHADOWBLADE":   return 7
+		"SELLSWORD":     return 4
+		_:               return 2
+
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+func _process(delta):
+	if state == State.PLAYING:
+		run_time += delta
+		floor_heat_accum += delta
+		if floor_heat_accum >= 60.0:
+			floor_heat_accum -= 60.0
+			floor_heat_level += 1
+		if _vanish_active:
+			_vanish_timer -= delta
+			if _vanish_timer <= 0.0:
+				_vanish_active = false
+
+func caught():
+	if state != State.PLAYING:
+		return
+	# DOUBLE_OR_NOTHING: no death save — instant fail
+	if run_modifier == "DOUBLE_OR_NOTHING":
+		death_save_rolled.emit(0, false)
+		state = State.CAUGHT
+		shake(8.0, 0.6)
+		state_changed.emit(state)
+		return
+	# Death save — roll d20; 15+ = escape with nothing
+	var save_roll := roll_death_save()
+	if save_roll >= 15:
+		death_save_rolled.emit(save_roll, true)
+		shake(4.0, 0.4)
+		return
+	death_save_rolled.emit(save_roll, false)
+	state = State.CAUGHT
+	shake(8.0, 0.6)
+	state_changed.emit(state)
+
+func get_death_save_roll() -> int:
+	return roll_death_save()
+
+func escaped():
+	if state != State.PLAYING and state != State.SHOPPING:
+		return
+	state = State.ESCAPED
+	state_changed.emit(state)
+
+func enter_shop():
+	if state != State.PLAYING:
+		return
+	if current_floor < MAX_FLOORS:
+		state = State.PASSIVE_PICK
+		show_passive_pick.emit()
+	else:
+		state = State.SHOPPING
+		roll_floor_shop()
+		show_shop.emit()
+
+func confirm_passive_pick(id: String):
+	if state != State.PASSIVE_PICK:
+		return
+	if id != "":
+		add_passive(id)
+	state = State.SHOPPING
+	roll_floor_shop()
+	show_shop.emit()
+
+func leave_shop():
+	if check_objective_complete() and floor_objective_bonus > 0:
+		add_gold(floor_objective_bonus)
+	current_floor += 1
+	if current_floor > MAX_FLOORS:
+		escaped()
+	else:
+		state = State.PLAYING
+		get_tree().change_scene_to_file("res://World.tscn")
+
+var _ward_resist_used := false
+
+func start_floor_timer():
+	_floor_start_time     = run_time
+	floor_alerts          = 0
+	floor_bodies_found    = 0
+	floor_takedowns       = 0
+	floor_bonus_collected = false
+	floor_heat_level      = 0
+	floor_heat_accum      = 0.0
+	second_wind_used      = false
+	_insurance_used       = false
+	_ward_resist_used     = false
+	_lockdown_incoming    = false
+	# iron_will_used is per-run — only reset on go_to_class_select()
+	_racial_luck_used     = false
+	_vanish_active        = false
+	_vanish_timer         = 0.0
+	apply_racial_passives()
+	if get_guild_unlock("GUILD_MARK"):
+		add_gold(50)
+
+func record_takedown(is_frontal: bool = false):
+	takedowns += 1
+	floor_takedowns += 1
+	lifetime_takedowns += 1
+	if run_modifier == "BLOOD_MONEY":
+		add_gold(50)
+	if selected_class == "ASSASSIN" and is_frontal:
+		add_gold(120)
+	if has_passive("PICKPOCKET"):
+		add_gold(35)
+
+func record_alert():
+	times_alerted += 1
+	floor_alerts += 1
+	lifetime_alerts += 1
+	if has_passive("INSURANCE") and not _insurance_used:
+		_insurance_used = true
+	else:
+		alert_escalation += 1
+		raise_wanted_level(1)
+	if floor_alerts >= 2:
+		_lockdown_incoming = true
+	alert_triggered.emit()
+	shake(3.0, 0.25)
+
+func collect_bonus_loot():
+	bonus_loot_collected  = true
+	floor_bonus_collected = true
+func add_gold(amount: int): gold_collected += amount
+
+# ── Multi-floor ───────────────────────────────────────────────────────────────
+func save_player_weapon(w: String) -> void:
+	floor_carry_weapon = w
+
+func save_player_gear(gear: Dictionary) -> void:
+	floor_carry_gear = gear.duplicate()
+
+func get_start_gear() -> Dictionary:
+	return floor_carry_gear.duplicate()
+
+func has_gear_effect(effect: String) -> bool:
+	for slot in floor_carry_gear:
+		var gid: String = floor_carry_gear[slot]
+		if not gid.is_empty():
+			var gdata: Dictionary = GEAR.get(gid, {})
+			if gdata.get("effect", "") == effect:
+				return true
+	return false
+
+func save_player_items(player_items: Array) -> void:
+	floor_carry_items.clear()
+	for item in player_items:
+		floor_carry_items.append({"type": item["type"], "count": item["count"]})
+
+func save_player_equipped(player_equipped: Array) -> void:
+	floor_carry_equipped.clear()
+	floor_carry_equipped.assign(player_equipped)
+
+func get_start_items() -> Array:
+	if current_floor > 1 and not floor_carry_items.is_empty():
+		return floor_carry_items
+	return []
+
+func get_start_equipped() -> Array[int]:
+	if current_floor > 1 and not floor_carry_equipped.is_empty():
+		return floor_carry_equipped
+	return []
+
+# ── End-of-run ────────────────────────────────────────────────────────────────
+func finish_run(success: bool):
+	if success:
+		runs_completed += 1
+		var order = ["", "ROGUE", "SELLSWORD", "SHADOWBLADE", "PHANTOM THIEF"]
+		if order.find(get_rating()) > order.find(best_rating):
+			best_rating = get_rating()
+		match get_rating():
+			"PHANTOM THIEF": guild_rep += 10
+			"SHADOWBLADE":   guild_rep += 7
+			"SELLSWORD":     guild_rep += 4
+			_:               guild_rep += 2
+	else:
+		guild_rep += 1
+	runs_attempted += 1
+	lifetime_gold += gold_collected - gold_spent
+	if success and times_alerted == 0:
+		ghost_runs += 1
+	save_persistent()
+
+func _reset_run_state():
+	state                = State.PLAYING
+	run_time             = 0.0
+	takedowns            = 0
+	times_alerted        = 0
+	alert_escalation     = 0
+	bonus_loot_collected = false
+	gold_collected       = 0
+	gold_spent           = 0
+	current_floor        = 1
+	floor_complication   = "CLEAR"
+	floor_carry_items.clear()
+	floor_carry_equipped.clear()
+	floor_carry_weapon   = "NONE"
+	floor_carry_gear     = { "boots": "", "cloak": "", "offhand": "", "trinket": "" }
+	active_passives.clear()
+	floor_heat_level     = 0
+	floor_heat_accum     = 0.0
+	active_contract      = "NONE"
+	contract_name        = ""
+	contract_desc        = ""
+	contract_bonus       = 0
+	wanted_level         = 0
+	_wanted_bribe_used   = false
+	player_is_bleeding   = false
+	player_is_limping    = false
+	_lockdown_incoming   = false
+	_runed_blade_charges = 0
+	_venom_needle_uses   = 2
+	iron_will_used       = false
+	_racial_luck_used    = false
+	_vanish_active       = false
+	# HP by class
+	match selected_class:
+		"SELLSWORD":    player_max_hp = 8
+		"ASSASSIN":     player_max_hp = 6
+		"SHADOWDANCER": player_max_hp = 5
+		"CUTPURSE":     player_max_hp = 5
+		_:              player_max_hp = 6
+	player_hp = player_max_hp
+
+func go_to_class_select():
+	finish_run(state == State.ESCAPED)
+	_reset_run_state()
+	quartermaster_name = QUARTERMASTERS[randi() % QUARTERMASTERS.size()]
+	get_tree().change_scene_to_file("res://ClassSelect.tscn")
+
+func restart():
+	finish_run(false)
+	_reset_run_state()
+	get_tree().change_scene_to_file("res://World.tscn")
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+func load_persistent():
+	var cfg = ConfigFile.new()
+	if cfg.load(SAVE_PATH) != OK:
+		return
+	lifetime_gold      = cfg.get_value("stats", "lifetime_gold",      0)
+	runs_completed     = cfg.get_value("stats", "runs_completed",     0)
+	runs_attempted     = cfg.get_value("stats", "runs_attempted",     0)
+	best_rating        = cfg.get_value("stats", "best_rating",        "")
+	guild_rep          = cfg.get_value("stats", "guild_rep",          0)
+	lifetime_takedowns = cfg.get_value("stats", "lifetime_takedowns", 0)
+	lifetime_alerts    = cfg.get_value("stats", "lifetime_alerts",    0)
+	ghost_runs         = cfg.get_value("stats", "ghost_runs",         0)
+
+func save_persistent():
+	var cfg = ConfigFile.new()
+	cfg.set_value("stats", "lifetime_gold",      lifetime_gold)
+	cfg.set_value("stats", "runs_completed",     runs_completed)
+	cfg.set_value("stats", "runs_attempted",     runs_attempted)
+	cfg.set_value("stats", "best_rating",        best_rating)
+	cfg.set_value("stats", "guild_rep",          guild_rep)
+	cfg.set_value("stats", "lifetime_takedowns", lifetime_takedowns)
+	cfg.set_value("stats", "lifetime_alerts",    lifetime_alerts)
+	cfg.set_value("stats", "ghost_runs",         ghost_runs)
+	cfg.save(SAVE_PATH)
+
+# ── Rating / display ──────────────────────────────────────────────────────────
+func get_rating() -> String:
+	if times_alerted == 0 and takedowns == 0:
+		return "PHANTOM THIEF"
+	elif times_alerted == 0:
+		return "SHADOWBLADE"
+	elif takedowns >= 2:
+		return "SELLSWORD"
+	else:
+		return "ROGUE"
+
+func get_rating_description() -> String:
+	match get_rating():
+		"PHANTOM THIEF": return "Not a soul knew you were there."
+		"SHADOWBLADE":   return "Efficient. Clean. The guild approves."
+		"SELLSWORD":     return "Subtlety is overrated. Results aren't."
+		_:               return "The job is done. The coin is yours."
+
+func get_wanted_stars() -> int:
+	return wanted_level
+
+# ── Wanted level system ───────────────────────────────────────────────────────
+# 0=Unknown  1=Spotted  2=Recognized  3=Notorious  4=Hunted  5=City Watch
+# Consequences that scale with wanted_level:
+#   detection speed: +8% per level
+#   guard patrol density: extra guard added at level 3+
+#   shop prices: +10% per level (fences get nervous)
+#   at level 5: all guards start SUSPICIOUS; hounds patrol outer doors
+
+func raise_wanted_level(amount: int = 1):
+	wanted_level = min(5, wanted_level + amount)
+
+func lower_wanted_level(amount: int = 1):
+	wanted_level = max(0, wanted_level - amount)
+
+func take_damage(amount: int = 2) -> bool:
+	player_hp = max(0, player_hp - amount)
+	shake(5.0, 0.35)
+	alert_triggered.emit()   # red flash
+	# Critical hit — being hurt causes bleeding; getting low causes limping
+	if player_hp <= player_max_hp / 2:
+		player_is_bleeding = true
+	if player_hp <= 1:
+		player_is_limping = true
+	if player_hp <= 0:
+		caught()
+		return true           # true = died
+	return false
+
+func heal_hp(amount: int) -> void:
+	player_hp = min(player_max_hp, player_hp + amount)
+
+# Call after each guard kill: if no living alerted guards remain and no bodies
+# have been officially found this floor, clear the wanted level entirely.
+func check_wanted_decay(scene_tree) -> void:
+	if wanted_level == 0:
+		return
+	if floor_bodies_found > 0:
+		return
+	for g in scene_tree.get_nodes_in_group("guards"):
+		if is_instance_valid(g) and g.get("alert_state") != null:
+			# alert_state 1=SUSPICIOUS, 2=ALERT — either counts as aware
+			if int(g.get("alert_state")) >= 1:
+				return
+	# No aware guards alive and no bodies found — clear wanted level
+	wanted_level = 0
+
+func get_wanted_detection_mult() -> float:
+	return 1.0 + wanted_level * 0.08
+
+func get_wanted_price_mult() -> float:
+	return 1.0 + wanted_level * 0.10
+
+func get_wanted_name() -> String:
+	match wanted_level:
+		0: return "Unknown"
+		1: return "Spotted"
+		2: return "Recognized"
+		3: return "Notorious"
+		4: return "Hunted"
+		5: return "City Watch"
+	return "Unknown"
+
+func get_wanted_color() -> Color:
+	match wanted_level:
+		0: return Color(0.55, 0.55, 0.55)
+		1: return Color(0.80, 0.80, 0.20)
+		2: return Color(0.95, 0.65, 0.15)
+		3: return Color(0.95, 0.40, 0.10)
+		4: return Color(0.90, 0.15, 0.15)
+		5: return Color(1.00, 0.00, 0.00)
+	return Color(0.55, 0.55, 0.55)
+
+func try_bribe_wanted_level() -> bool:
+	if _wanted_bribe_used or wanted_level == 0:
+		return false
+	_wanted_bribe_used = true
+	lower_wanted_level(2)
+	var bribe_cost := 80 + wanted_level * 40
+	gold_spent += bribe_cost
+	return true
+
+func format_time() -> String:
+	var secs: int = int(run_time)
+	var mins: int = secs / 60
+	return "%d:%02d" % [mins, secs % 60]
+
+func get_floor_name() -> String:
+	match current_floor:
+		1: return "The Cellars"
+		2: return "The Barracks"
+		3: return "The Inner Vault"
+		4: return "The Inner Sanctum"
+		5: return "The Throne Room"
+		_: return "Unknown"
