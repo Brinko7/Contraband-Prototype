@@ -12,20 +12,20 @@ func setup(weapon_id: String, dir: Vector2, silent: bool):
 	_silent     = silent
 	match weapon_id:
 		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT":
-			_duration = 0.35
-		"VENOM_NEEDLE", "SHIV", "STILETTO":
-			_duration = 0.30
-		"SPEAR":
-			_duration = 0.30
-		"LONGSWORD", "BROADSWORD", "BLADESONG":
-			_duration = 0.28
-		"WAND":
 			_duration = 0.40
+		"VENOM_NEEDLE", "SHIV", "STILETTO", "ASSASSIN_FANG":
+			_duration = 0.28
+		"SPEAR":
+			_duration = 0.36
+		"LONGSWORD", "BROADSWORD", "BLADESONG":
+			_duration = 0.34
+		"WAND":
+			_duration = 0.45
 		_:
-			_duration = 0.25
+			_duration = 0.30
 	_timer = _duration
 
-func _process(delta):
+func _process(delta: float):
 	_timer -= delta
 	if _timer <= 0.0:
 		queue_free()
@@ -33,106 +33,139 @@ func _process(delta):
 	queue_redraw()
 
 func _draw():
-	var t: float = clamp(_timer / _duration, 0.0, 1.0)   # 1 = start, 0 = end
+	var t: float    = clamp(_timer / _duration, 0.0, 1.0)   # 1=start → 0=end
 	var fade: float = t
 
-	# Pick color based on weapon type and silent
-	var col: Color
+	# Base color — silent attacks are teal, loud are orange-white
+	var col: Color = Color(0.25, 0.90, 0.75, fade * 0.90) if _silent else Color(1.00, 0.65, 0.20, fade * 0.90)
 	match _weapon_id:
 		"SHADOW_BLADE", "GHOST_BLADE", "VOID_REAPER", "SMOKE_BLADE":
-			col = Color(0.55, 0.20, 0.90, fade * 0.75)
+			col = Color(0.60, 0.15, 0.95, fade * 0.88)
 		"BLADESONG":
-			col = Color(0.40, 0.75, 1.00, fade * 0.85)
+			col = Color(0.45, 0.85, 1.00, fade * 0.92)
 		"WAND":
-			col = Color(0.65, 0.25, 1.00, fade * 0.90)
+			col = Color(0.70, 0.20, 1.00, fade * 0.95)
 		"LONGSWORD", "BROADSWORD":
-			col = Color(0.90, 0.85, 0.50, fade * 0.85)
+			col = Color(0.95, 0.90, 0.55, fade * 0.90)
 		"SPEAR":
-			col = Color(0.75, 0.60, 0.30, fade * 0.85)
-		_:
-			if _silent:
-				col = Color(0.25, 0.80, 0.65, fade * 0.80)
-			else:
-				col = Color(1.00, 0.50, 0.15, fade * 0.80)
+			col = Color(0.80, 0.65, 0.30, fade * 0.90)
 
 	match _weapon_id:
+		# ── Ranged: crossbows ────────────────────────────────────────────────
 		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT":
-			# Thin line projectile extending 200px in facing direction
-			var length: float = 200.0 * (1.0 - (1.0 - t) * 0.4)
-			draw_line(Vector2.ZERO, _direction * length, col, 1.5)
-			# Small tip circle
-			draw_circle(_direction * length, 2.0, col)
+			var bolt_len: float = 260.0 * (1.0 - (1.0 - t) * 0.3)
+			# Thick bolt body
+			draw_line(Vector2.ZERO, _direction * bolt_len,
+				Color(col.r, col.g, col.b, fade * 0.90), 3.0)
+			# Bright inner core
+			draw_line(Vector2.ZERO, _direction * bolt_len,
+				Color(1.0, 1.0, 0.90, fade * 0.60), 1.2)
+			# Glowing tip
+			draw_circle(_direction * bolt_len, 4.0 * t,
+				Color(1.0, 0.95, 0.70, fade))
 
-		"VENOM_NEEDLE", "SHIV":
-			# Dashed arc trajectory (throw)
-			var arc_len := 120.0
-			var perp := _direction.rotated(PI * 0.5)
-			var ctrl_pt: Vector2 = _direction * arc_len * 0.6 + perp * 20.0
-			var steps := 8
-			var prev := Vector2.ZERO
-			for i in range(1, steps + 1):
-				var bt: float = float(i) / float(steps)
-				var pt: Vector2 = (1.0 - bt) * (1.0 - bt) * Vector2.ZERO \
-					+ 2.0 * (1.0 - bt) * bt * ctrl_pt \
-					+ bt * bt * (_direction * arc_len)
-				if i % 2 == 0:
-					draw_line(prev, pt, col, 1.2)
-				prev = pt
+		# ── Jab / dagger: sharp forward stab ────────────────────────────────
+		"SHIV", "STILETTO", "ASSASSIN_FANG", "VENOM_NEEDLE":
+			# Blade at full reach at start of animation, retracts as it fades
+			var stab_len: float = 32.0 * (0.50 + t * 0.50)
+			var perp: Vector2 = _direction.rotated(PI * 0.5)
+			# Glow trail behind the blade
+			draw_line(Vector2.ZERO, _direction * stab_len * 0.70,
+				Color(col.r, col.g, col.b, fade * 0.28), 6.0)
+			# Main blade line
+			draw_line(Vector2.ZERO, _direction * stab_len, col, 2.8)
+			# Bright edge (sharpness highlight)
+			draw_line(_direction * stab_len * 0.30, _direction * stab_len,
+				Color(1.0, 0.98, 0.88, fade * 0.70), 1.2)
+			# Small crossguard
+			draw_line(_direction * stab_len * 0.30 - perp * 5.0,
+				_direction * stab_len * 0.30 + perp * 5.0,
+				Color(col.r, col.g, col.b, fade * 0.55), 2.0)
+			# Glinting tip
+			draw_circle(_direction * stab_len, 3.5 * t,
+				Color(1.0, 0.95, 0.80, fade))
 
-		"STILETTO", "ASSASSIN_FANG":
-			# Fast dashed throw arc
-			var arc_len2 := 150.0
-			var perp2 := _direction.rotated(PI * 0.5)
-			var ctrl2: Vector2 = _direction * arc_len2 * 0.5 + perp2 * 15.0
-			var steps2 := 10
-			var prev2 := Vector2.ZERO
-			for i in range(1, steps2 + 1):
-				var bt2: float = float(i) / float(steps2)
-				var pt2: Vector2 = (1.0 - bt2) * (1.0 - bt2) * Vector2.ZERO \
-					+ 2.0 * (1.0 - bt2) * bt2 * ctrl2 \
-					+ bt2 * bt2 * (_direction * arc_len2)
-				if i % 2 == 0:
-					draw_line(prev2, pt2, col, 1.2)
-				prev2 = pt2
-
+		# ── Broad swords: wide slash ─────────────────────────────────────────
 		"LONGSWORD", "BROADSWORD", "BLADESONG":
-			# Wide 140° slash arc
-			var radius := 22.0
+			var radius := 36.0
 			var fa := _direction.angle()
-			var sweep := deg_to_rad(140.0)
+			var sweep := deg_to_rad(150.0)
 			var arc_start := fa - sweep * 0.5
-			var actual_sweep: float = sweep * (0.3 + t * 0.7)
-			draw_arc(Vector2.ZERO, radius * (0.6 + t * 0.4), arc_start, arc_start + actual_sweep, 18, col, 3.0)
-			draw_circle(_direction * radius, 3.0 * t, col)
-			# BLADESONG: second arc slightly offset
+			var actual_sweep: float = sweep * (0.25 + t * 0.75)
+
+			# Outer glow ring
+			draw_arc(Vector2.ZERO, radius * (0.65 + t * 0.35) + 4.0,
+				arc_start, arc_start + actual_sweep, 22,
+				Color(col.r, col.g, col.b, fade * 0.30), 6.0)
+			# Main arc
+			draw_arc(Vector2.ZERO, radius * (0.65 + t * 0.35),
+				arc_start, arc_start + actual_sweep, 22, col, 4.5)
+			# Inner bright edge
+			draw_arc(Vector2.ZERO, radius * (0.65 + t * 0.35) - 2.0,
+				arc_start, arc_start + actual_sweep, 18,
+				Color(1.0, 1.0, 0.95, fade * 0.50), 1.5)
+			# Impact dot at tip
+			draw_circle(_direction * radius, 4.5 * t, col)
+
 			if _weapon_id == "BLADESONG":
-				var col2 := Color(0.70, 0.90, 1.00, fade * 0.50)
-				draw_arc(Vector2.ZERO, radius * 0.65, arc_start - deg_to_rad(10), arc_start + actual_sweep + deg_to_rad(10), 14, col2, 1.5)
+				var col2 := Color(0.55, 0.92, 1.00, fade * 0.55)
+				draw_arc(Vector2.ZERO, radius * 0.55,
+					arc_start - deg_to_rad(12), arc_start + actual_sweep + deg_to_rad(12),
+					16, col2, 2.5)
 
+		# ── Spear: powerful thrust ────────────────────────────────────────────
 		"SPEAR":
-			# Straight thrust: extends 2 tiles then snaps back
-			var thrust_len := 34.0 * (0.5 + t * 0.5)
-			draw_line(Vector2.ZERO, _direction * thrust_len, col, 3.0)
-			draw_circle(_direction * thrust_len, 3.5 * t, col)
-			# Crossguard lines
+			var thrust_len := 52.0 * (0.45 + t * 0.55)
 			var perp := _direction.rotated(PI * 0.5)
-			draw_line(_direction * 8.0 - perp * 5.0, _direction * 8.0 + perp * 5.0, Color(col.r, col.g, col.b, fade * 0.5), 1.5)
+			# Shaft
+			draw_line(Vector2.ZERO, _direction * thrust_len,
+				Color(col.r * 0.65, col.g * 0.55, col.b * 0.30, fade * 0.80), 4.0)
+			# Blade glow
+			draw_line(_direction * (thrust_len * 0.55), _direction * thrust_len, col, 3.5)
+			draw_line(_direction * (thrust_len * 0.55), _direction * thrust_len,
+				Color(1.0, 0.95, 0.80, fade * 0.55), 1.5)
+			# Tip
+			draw_circle(_direction * thrust_len, 4.5 * t, col)
+			# Crossguard
+			draw_line(_direction * (thrust_len * 0.45) - perp * 7.0,
+				_direction * (thrust_len * 0.45) + perp * 7.0,
+				Color(col.r, col.g, col.b, fade * 0.60), 2.5)
 
+		# ── Wand: pulsing magical orb ─────────────────────────────────────────
 		"WAND":
-			# Pulsing orb leaving a glow trail
-			var orb_dist := 16.0 * (1.0 - t)
-			draw_circle(_direction * orb_dist, 4.0 + (1.0 - t) * 2.0, col)
-			draw_arc(_direction * orb_dist, 7.0, 0, TAU, 16, Color(col.r, col.g, col.b, fade * 0.35), 1.5)
+			var orb_dist := 20.0 * (1.0 - t)
+			var orb_r    := 6.0 + (1.0 - t) * 3.0
+			# Outer glow
+			draw_circle(_direction * orb_dist, orb_r + 4.0,
+				Color(col.r, col.g, col.b, fade * 0.22))
+			# Core
+			draw_circle(_direction * orb_dist, orb_r, col)
+			# Bright center
+			draw_circle(_direction * orb_dist, orb_r * 0.45,
+				Color(1.0, 0.95, 1.00, fade * 0.70))
+			# Trailing ring
+			draw_arc(_direction * orb_dist, orb_r + 2.0, 0, TAU, 20,
+				Color(col.r, col.g, col.b, fade * 0.40), 1.8)
 
+		# ── Default: all other melee ──────────────────────────────────────────
 		_:
-			# Melee sweep arc: 120° in facing direction, radius ~20px
-			var radius := 20.0
+			var radius := 28.0
 			var fa := _direction.angle()
-			var sweep := deg_to_rad(120.0)
+			var sweep := deg_to_rad(130.0)
 			var arc_start := fa - sweep * 0.5
-			# Fade the arc: at t=1 (fresh) full, shrinks and fades
-			var actual_sweep: float = sweep * (0.3 + t * 0.7)
-			draw_arc(Vector2.ZERO, radius * (0.6 + t * 0.4), arc_start, arc_start + actual_sweep, 16, col, 2.5)
-			# Small impact dot at tip
+			var actual_sweep: float = sweep * (0.25 + t * 0.75)
+
+			# Glow halo
+			draw_arc(Vector2.ZERO, radius * (0.60 + t * 0.40) + 3.0,
+				arc_start, arc_start + actual_sweep, 18,
+				Color(col.r, col.g, col.b, fade * 0.25), 5.0)
+			# Main arc
+			draw_arc(Vector2.ZERO, radius * (0.60 + t * 0.40),
+				arc_start, arc_start + actual_sweep, 18, col, 3.5)
+			# Inner bright line
+			draw_arc(Vector2.ZERO, radius * (0.60 + t * 0.40) - 2.0,
+				arc_start, arc_start + actual_sweep, 14,
+				Color(1.0, 1.0, 0.95, fade * 0.45), 1.2)
+			# Tip
 			var tip := _direction * radius
-			draw_circle(tip, 2.5 * t, col)
+			draw_circle(tip, 3.5 * t, col)

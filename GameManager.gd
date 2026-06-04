@@ -35,6 +35,13 @@ var player_max_hp: int = 6
 var player_is_bleeding := false
 var player_is_limping  := false
 
+# ── Combo meter — resets on taking damage ───────────────────────────────────
+var combo_hits: int = 0
+var combo_tier: int = 0  # 0=none, 1=SHARP(3+), 2=RELENTLESS(5+), 3=GHOST(8+)
+
+# ── Room-clear bonuses — per-floor, indexed by room ─────────────────────────
+var cleared_rooms: Array = []
+
 # ── Lockdown — if floor_alerts >= 2 on a floor, next floor gets a guard surge ─
 var _lockdown_incoming := false
 
@@ -644,14 +651,14 @@ const WEAPON_COMBAT := {
 	"SHIV":               {"shape": "jab",    "damage": 1, "cooldown": 0.28, "noise_r":   0.0},
 	"STILETTO":           {"shape": "jab",    "damage": 1, "cooldown": 0.25, "noise_r":   0.0},
 	"ASSASSIN_FANG":      {"shape": "jab",    "damage": 2, "cooldown": 0.22, "noise_r":   0.0},
-	"SHADOW_BLADE":       {"shape": "slash",  "damage": 1, "cooldown": 0.40, "noise_r":   0.0},
-	"GHOST_BLADE":        {"shape": "slash",  "damage": 1, "cooldown": 0.38, "noise_r":   0.0},
+	"SHADOW_BLADE":       {"shape": "slash",  "damage": 2, "cooldown": 0.40, "noise_r":   0.0},
+	"GHOST_BLADE":        {"shape": "slash",  "damage": 2, "cooldown": 0.38, "noise_r":   0.0},
 	"VOID_REAPER":        {"shape": "slash",  "damage": 2, "cooldown": 0.36, "noise_r":   0.0},
 	"CROSSBOW":           {"shape": "bolt",   "damage": 2, "cooldown": 1.20, "noise_r": 140.0},
 	"REPEATING_CROSSBOW": {"shape": "bolt",   "damage": 1, "cooldown": 0.65, "noise_r": 120.0},
 	"SILENT_BOLT":        {"shape": "bolt",   "damage": 1, "cooldown": 0.80, "noise_r":   0.0},
 	"GARROTE":            {"shape": "jab",    "damage": 2, "cooldown": 0.60, "noise_r":   0.0},
-	"VENOM_NEEDLE":       {"shape": "bolt",   "damage": 1, "cooldown": 0.50, "noise_r":   0.0},
+	"VENOM_NEEDLE":       {"shape": "bolt",   "damage": 2, "cooldown": 0.50, "noise_r":   0.0},
 	"RUNED_BLADE":        {"shape": "slash",  "damage": 2, "cooldown": 0.42, "noise_r":  60.0},
 	"SMOKE_BLADE":        {"shape": "slash",  "damage": 1, "cooldown": 0.40, "noise_r":   0.0},
 	"WAR_PICK":           {"shape": "slash",  "damage": 2, "cooldown": 0.55, "noise_r": 140.0},
@@ -659,7 +666,7 @@ const WEAPON_COMBAT := {
 	"BROADSWORD":         {"shape": "slash",  "damage": 3, "cooldown": 0.52, "noise_r": 100.0},
 	"BLADESONG":          {"shape": "slash",  "damage": 3, "cooldown": 0.48, "noise_r":  40.0},
 	"SPEAR":              {"shape": "thrust", "damage": 2, "cooldown": 0.60, "noise_r":  80.0},
-	"WAND":               {"shape": "orb",    "damage": 1, "cooldown": 0.80, "noise_r":   0.0},
+	"WAND":               {"shape": "orb",    "damage": 2, "cooldown": 0.80, "noise_r":   0.0},
 }
 
 var floor_carry_weapon := "NONE"
@@ -1108,6 +1115,7 @@ func start_floor_timer():
 	floor_bodies_found    = 0
 	floor_takedowns       = 0
 	floor_bonus_collected = false
+	cleared_rooms         = []
 	floor_heat_level      = 0
 	floor_heat_accum      = 0.0
 	second_wind_used      = false
@@ -1323,7 +1331,20 @@ func raise_wanted_level(amount: int = 1):
 func lower_wanted_level(amount: int = 1):
 	wanted_level = max(0, wanted_level - amount)
 
+func record_combo_hit() -> int:
+	combo_hits += 1
+	combo_tier = 0
+	if combo_hits >= 8:   combo_tier = 3
+	elif combo_hits >= 5: combo_tier = 2
+	elif combo_hits >= 3: combo_tier = 1
+	return combo_tier
+
+func reset_combo() -> void:
+	combo_hits = 0
+	combo_tier = 0
+
 func take_damage(amount: int = 2) -> bool:
+	reset_combo()
 	player_hp = max(0, player_hp - amount)
 	shake(5.0, 0.35)
 	alert_triggered.emit()   # red flash

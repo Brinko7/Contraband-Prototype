@@ -88,8 +88,45 @@ var _weapon_swap_cooldown := 0.0
 
 # Combat attack
 var _attack_cooldown := 0.0
+var _battle_shout_active := false  # SELLSWORD: next melee hit deals double damage
 
-const ABILITY_COOLDOWNS := { "CUTPURSE": 8.0, "SHADOWDANCER": 12.0, "ASSASSIN": 15.0 }
+# Movement slide — sprite visually slides from old tile to new while position snaps
+var _slide_from:   Vector2 = Vector2.ZERO   # sprite-local offset at slide start
+var _slide_t:      float   = 0.0            # 0→1 progress; 0 = idle
+const _SLIDE_DUR:  float   = 0.08           # seconds to complete one tile slide
+
+# Attack lunge + hitstop
+var _lunge_t:      float   = 0.0            # 0→1 progress; drives sprite offset forward then back
+const _LUNGE_DUR:  float   = 0.10           # total lunge animation duration
+const _LUNGE_PX:   float   = 5.0            # max pixel offset in facing direction
+var _hitstop_t:    float   = 0.0            # > 0 = freeze _process logic (visual pause only)
+
+# Room tracking — triggers patrol preview on first entry
+var _last_room: int = -1
+
+# Pebble throw — free distraction, quiet noise, 6s cooldown
+var _pebble_cooldown: float = 0.0
+const _PEBBLE_CD: float = 6.0
+const _PEBBLE_RANGE: int = 6   # tiles
+
+# Dodge roll
+var _dodge_cooldown: float = 0.0
+var _dodge_iframes:  float = 0.0            # > 0 = invincible; guards can't fill detection
+const _DODGE_CD:      float = 1.5
+const _DODGE_IFRAMES: float = 0.22
+const _DODGE_TILES:   int   = 2
+
+# Charge attack — hold attack button to power up
+var _attack_held:    bool  = false
+var _attack_hold_t:  float = 0.0
+const _CHARGE_THRESHOLD: float = 0.38     # seconds held to trigger charge
+const _CHARGE_MAX:        float = 0.70     # caps hold time
+
+# Parry window — active briefly after pressing attack near an ALERT guard
+var _parry_t: float = 0.0
+const _PARRY_WINDOW: float = 0.30
+
+const ABILITY_COOLDOWNS := { "CUTPURSE": 8.0, "SHADOWDANCER": 12.0, "ASSASSIN": 15.0, "SELLSWORD": 10.0 }
 const RACIAL_COOLDOWNS  := { "HALFLING": 0.0, "TIEFLING": 14.0, "WOOD_ELF": 18.0, "DWARF": 20.0 }
 
 # Walk = fast but LOUD. Sneak = slow but QUIET (or silent with CUTPURSE passive).
@@ -117,6 +154,7 @@ func _ready():
 	reset_floor_charges()
 	GameManager.screen_shake.connect(_on_screen_shake)
 	_setup_sprite()
+	_setup_camera()
 	# Load injury state carried from previous floor
 	is_bleeding = GameManager.player_is_bleeding
 	is_limping  = GameManager.player_is_limping
@@ -124,6 +162,13 @@ func _ready():
 	if GameManager.selected_class == "ASSASSIN":
 		_patrol_reveal_timer = PATROL_REVEAL_DURATION
 		_popup("RECONNAISSANCE: patrol routes revealed", Color(0.85, 0.15, 0.15))
+
+func _setup_camera():
+	var cam := get_node_or_null("Camera2D") as Camera2D
+	if cam:
+		cam.zoom = Vector2(3.0, 3.0)
+		cam.position_smoothing_enabled = true
+		cam.position_smoothing_speed   = 8.0
 
 func _setup_sprite():
 	var tex := load(_SPRITE_SHEET) as Texture2D
@@ -204,6 +249,7 @@ func reset_floor_charges():
 		_:              _ghost_blade_strikes_left = 0
 	_venom_needle_uses_left    = GameManager._venom_needle_uses
 	_runed_blade_charges       = GameManager._runed_blade_charges
+	GameManager._wand_charges  = 5
 	_shadowdancer_silent_kills = 0
 	_cutpurse_free_item_used   = false
 	keys                       = []
@@ -307,6 +353,29 @@ func _process(delta):
 			if Input.is_joy_button_pressed(joypad, JOY_BUTTON_LEFT_SHOULDER):
 				is_sneaking = true
 				break
+
+	# Charge attack tracking — must run before hitstop so release is detected immediately
+	if GameManager.state == GameManager.State.PLAYING and not is_hidden:
+		var attack_down: bool = Input.is_action_pressed("game_takedown")
+		if attack_down and not _attack_held:
+			_attack_held   = true
+			_attack_hold_t = 0.0
+		elif attack_down and _attack_held:
+			_attack_hold_t = min(_attack_hold_t + delta, _CHARGE_MAX)
+		elif not attack_down and _attack_held:
+			_attack_held = false
+			var was_charged: bool = _attack_hold_t >= _CHARGE_THRESHOLD
+			_attack_hold_t = 0.0
+			if was_charged:
+				_do_charged_attack()
+			else:
+				_try_takedown()
+
+	# Hitstop: freeze gameplay timers for a frame-freeze effect on hit
+	if _hitstop_t > 0.0:
+		_hitstop_t -= delta
+		return
+
 	if _move_cooldown > 0.0:
 		_move_cooldown -= delta
 	if ability_cooldown > 0.0:
@@ -337,6 +406,19 @@ func _process(delta):
 		_weapon_swap_cooldown -= delta
 	if _attack_cooldown > 0.0:
 		_attack_cooldown -= delta
+	if _dodge_cooldown > 0.0:
+		_dodge_cooldown -= delta
+	if _pebble_cooldown > 0.0:
+		_pebble_cooldown -= delta
+	# Room entry: trigger patrol preview for guards in the newly entered room
+	_check_room_entry()
+	if _dodge_iframes > 0.0:
+		_dodge_iframes -= delta
+	if _parry_t > 0.0:
+		_parry_t -= delta
+	# SPEAR passive parry: small always-on window when attack is ready
+	if weapon == "SPEAR" and _attack_cooldown <= 0.0 and _parry_t <= 0.0:
+		_parry_t = 0.10
 	# Bleeding: emit a quiet noise periodically; half-rate if BLOOD_VIAL equipped
 	if is_bleeding and GameManager.state == GameManager.State.PLAYING:
 		_bleed_timer -= delta
@@ -375,6 +457,7 @@ func _process(delta):
 				facing = dir
 				var target: Vector2 = position + dir * TILE_SIZE
 				if not is_position_blocked(target):
+					_start_slide(dir)
 					position = target
 					_emit_movement_noise()
 				var base_walk: float  = WALK_COOLDOWN  * (0.80 if GameManager.has_passive("QUICK_HANDS") else 1.0)
@@ -383,8 +466,29 @@ func _process(delta):
 				var body_mult := (1.0 if no_slow else 1.4) if is_carrying_body else 1.0
 				var limp_mult   := 1.4 if is_limping else 1.0
 				var speed_mult  := 0.55 if _quicksilver_active else 1.0
+				# RELENTLESS tier: +20% move speed
+				if GameManager.combo_tier >= 2:
+					speed_mult *= 0.80
 				_move_cooldown = (base_sneak if (is_sneaking or is_carrying_body) else base_walk) * body_mult * limp_mult * speed_mult
 				_walk_frame = (_walk_frame + 1) % 2
+
+	# ── Slide animation ───────────────────────────────────────────────────────
+	if _slide_t > 0.0:
+		_slide_t = max(0.0, _slide_t - delta / _SLIDE_DUR)
+		if _sprite != null:
+			# ease-out: t² gives a snappy deceleration feel
+			var ease: float = _slide_t * _slide_t
+			_sprite.position = _slide_from * ease
+	elif _sprite != null and not _lunge_t > 0.0:
+		_sprite.position = Vector2.ZERO
+
+	# ── Lunge animation ───────────────────────────────────────────────────────
+	if _lunge_t > 0.0:
+		_lunge_t = max(0.0, _lunge_t - delta / _LUNGE_DUR)
+		if _sprite != null:
+			# Sharp push forward then snap back: peaks at t=1, returns to 0
+			var env: float = sin(_lunge_t * PI)   # 0→1→0 envelope
+			_sprite.position = facing * _LUNGE_PX * env
 
 	_update_sprite_frame()
 	queue_redraw()
@@ -406,7 +510,8 @@ func _unhandled_input(event):
 			else:
 				_try_interact()
 			return
-		if event.is_action_pressed("game_takedown"):       _try_takedown();           return
+		if event.is_action_pressed("game_pebble"):         _throw_pebble();           return
+		if event.is_action_pressed("game_dodge"):          _try_dodge();              return
 		if event.is_action_pressed("game_weapon_special"): _use_weapon_special();     return
 		if event.is_action_pressed("game_item_1"):         _use_item(0);              return
 		if event.is_action_pressed("game_item_2"):         _use_item(1);              return
@@ -437,6 +542,7 @@ func _unhandled_input(event):
 		facing = direction
 		var target = position + direction * TILE_SIZE
 		if not is_position_blocked(target):
+			_start_slide(direction)
 			position = target
 			_emit_movement_noise()
 		var base_walk: float  = WALK_COOLDOWN  * (0.80 if GameManager.has_passive("QUICK_HANDS") else 1.0)
@@ -495,8 +601,13 @@ func _drop_body():
 		_carried_body.remove_meta("being_carried")
 		_carried_body = null
 	is_carrying_body = false
-	emit_noise(NoiseLevel.QUIET)
-	_popup("Body dropped", Color(0.70, 0.50, 0.30))
+	# Sneaking drops are silent; walking drops thud
+	if is_sneaking:
+		emit_noise(NoiseLevel.SILENT)
+		_popup("Body lowered", Color(0.55, 0.75, 0.45))
+	else:
+		emit_noise(NoiseLevel.QUIET)
+		_popup("Body dropped", Color(0.70, 0.50, 0.30))
 	AudioManager.body_drop()
 
 func pickup_loot():
@@ -520,14 +631,14 @@ func _try_takedown():
 		if global_position.distance_to(guard.global_position) > 24.0:
 			continue
 		if guard.alert_state == guard.AlertState.ALERT:
+			# Activate parry window — GHOST tier doubles the window
+			_parry_t = _PARRY_WINDOW * (2.0 if GameManager.combo_tier >= 3 else 1.0)
 			_do_combat_attack()
 			return
 		_resolve_takedown(guard)
 		return
-	# No adjacent guard — still fire combat attack for ranged/AoE weapons
-	var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["NONE"])
-	if cdata["shape"] in ["bolt", "orb", "slash", "thrust"]:
-		_do_combat_attack()
+	# No adjacent guard — always show weapon animation (like Stardew/Hotline Miami)
+	_do_combat_attack()
 
 func _resolve_takedown(guard):
 	var raw_behind := _is_behind_guard(guard)
@@ -742,6 +853,22 @@ func _resolve_takedown(guard):
 				is_limping = true
 				_popup("Limping!", Color(0.85, 0.55, 0.15))
 
+func _parry_riposte(guard: Node):
+	# Called by guard when player's _parry_t > 0 at the moment the guard's attack fires.
+	# Deals 2× weapon damage and stuns the guard for 0.6s.
+	_parry_t = 0.0
+	var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["NONE"])
+	var riposte_dmg: int = cdata["damage"] * 2
+	_popup("RIPOSTE!  -%d" % riposte_dmg, Color(0.35, 0.95, 0.55))
+	guard.hurt(riposte_dmg, (guard.global_position - global_position).normalized())
+	if is_instance_valid(guard):
+		guard.set("_is_stunned", true)
+		guard.set("_stun_timer", 0.60)
+	_start_lunge()
+	_spawn_attack_anim(true)
+	_trigger_hitstop()
+	GameManager.shake(2.0, 0.16)
+
 func _do_combat_attack():
 	var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["NONE"])
 	if _attack_cooldown > 0.0:
@@ -749,7 +876,10 @@ func _do_combat_attack():
 	_attack_cooldown = cdata["cooldown"]
 
 	var shape: String = cdata["shape"]
-	var damage: int   = cdata["damage"]
+	var base_dmg: int = cdata["damage"] * (2 if _battle_shout_active else 1)
+	# SHARP tier: +20% damage (rounds up)
+	var damage: int = ceili(base_dmg * 1.2) if GameManager.combo_tier >= 1 else base_dmg
+	_battle_shout_active = false
 
 	if shape == "orb":
 		_fire_wand_orb()
@@ -761,12 +891,41 @@ func _do_combat_attack():
 		return
 
 	# Melee shapes: jab / slash / thrust
+	_start_lunge()
 	var hit_guards := _get_attack_tiles(shape)
 	var hit_any := false
 	for guard in hit_guards:
-		if guard.has_method("hurt"):
-			guard.hurt(damage)
-			hit_any = true
+		if not guard.has_method("hurt"):
+			continue
+		var was_alive := is_instance_valid(guard)
+		var hit_dir: Vector2 = (guard.global_position - global_position).normalized()
+		var slammed: bool = _is_guard_against_wall(guard, hit_dir)
+		guard.hurt(damage, hit_dir)
+		GameManager.record_combo_hit()
+		hit_any = true
+		# Wall slam: guard knocked into wall = bonus 1 damage
+		if slammed and is_instance_valid(guard):
+			guard.hurt(1, hit_dir)
+			_popup("WALL SLAM!", Color(1.0, 0.70, 0.20))
+		if was_alive and not is_instance_valid(guard):
+			GameManager.record_takedown(true)
+			_post_kill_effects(guard, false)
+			var noise_r2: float = cdata["noise_r"]
+			if noise_r2 > 0.0:
+				GameManager.raise_wanted_level(1)
+			GameManager.check_wanted_decay(get_tree())
+			# Shadow blade: Ghost Strike — kill resets cooldown instantly
+			if weapon in ["SHADOW_BLADE", "GHOST_BLADE", "VOID_REAPER"]:
+				_attack_cooldown = 0.0
+				_popup("GHOST STRIKE!", Color(0.45, 0.90, 0.65))
+			# Sword: Kill Momentum — each kill reduces remaining cooldown
+			elif weapon in ["LONGSWORD", "BROADSWORD", "BLADESONG"]:
+				_attack_cooldown = max(0.0, _attack_cooldown - 0.20)
+
+	# Jab weapons: Quick Combo — every 3rd combo hit resets cooldown
+	if shape == "jab" and hit_any and GameManager.combo_hits > 0 and GameManager.combo_hits % 3 == 0:
+		_attack_cooldown = 0.0
+		_popup("QUICK COMBO!", Color(0.95, 0.80, 0.20))
 
 	var noise_r: float = cdata["noise_r"]
 	if noise_r > 0.0:
@@ -776,7 +935,8 @@ func _do_combat_attack():
 
 	_spawn_attack_anim(noise_r == 0.0)
 	if hit_any:
-		GameManager.shake(1.8, 0.12)
+		_trigger_hitstop()
+		GameManager.shake(2.5, 0.16)
 
 func _get_attack_tiles(shape: String) -> Array:
 	var guards_hit: Array = []
@@ -787,21 +947,18 @@ func _get_attack_tiles(shape: String) -> Array:
 
 		match shape:
 			"jab":
-				# 1-tile hit in facing direction
-				var dist := to_g.dot(facing)
-				var perp: float = abs(to_g.dot(facing.rotated(PI * 0.5)))
+				var dist: float = to_g.dot(facing)
+				var perp: float = absf(to_g.dot(facing.rotated(PI * 0.5)))
 				if dist >= 0.0 and dist <= tile * 1.2 and perp <= tile * 0.7:
 					guards_hit.append(guard)
 			"slash":
-				# 3-wide fan — 140° arc, 1.5 tiles range
 				if to_g.length() <= tile * 1.6:
-					var angle := facing.angle_to(to_g.normalized())
-					if abs(angle) <= deg_to_rad(70.0):
+					var angle: float = facing.angle_to(to_g.normalized())
+					if absf(angle) <= deg_to_rad(70.0):
 						guards_hit.append(guard)
 			"thrust":
-				# 2-tile straight ahead, narrow
-				var dist := to_g.dot(facing)
-				var perp: float = abs(to_g.dot(facing.rotated(PI * 0.5)))
+				var dist: float = to_g.dot(facing)
+				var perp: float = absf(to_g.dot(facing.rotated(PI * 0.5)))
 				if dist >= 0.0 and dist <= tile * 2.2 and perp <= tile * 0.5:
 					guards_hit.append(guard)
 
@@ -819,6 +976,142 @@ func _fire_wand_orb():
 	orb.global_position = global_position
 	orb.setup(facing, 1)
 	_popup("Orb fired! (%d left)" % GameManager._wand_charges, Color(0.55, 0.30, 0.95))
+
+func _try_dodge():
+	if _dodge_cooldown > 0.0 or is_carrying_body:
+		if _dodge_cooldown > 0.0:
+			_popup("Roll not ready (%.1fs)" % _dodge_cooldown, Color(0.55, 0.50, 0.45))
+		return
+	# Slide forward up to _DODGE_TILES tiles, stopping before any wall
+	var final_pos: Vector2 = position
+	for step in range(1, _DODGE_TILES + 1):
+		var target: Vector2 = position + facing * TILE_SIZE * step
+		if is_position_blocked(target):
+			break
+		final_pos = target
+	position       = final_pos
+	_dodge_cooldown = _DODGE_CD
+	_dodge_iframes  = _DODGE_IFRAMES
+	_start_slide(facing)
+	emit_noise(NoiseLevel.SILENT)
+	_popup("ROLL", Color(0.45, 0.75, 1.0))
+	GameManager.shake(0.8, 0.06)
+
+func _do_charged_attack():
+	var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["NONE"])
+	if _attack_cooldown > 0.0:
+		return
+	_attack_cooldown = cdata["cooldown"] * 1.5   # slower recovery after big swing
+
+	var shape: String = cdata["shape"]
+	var base_dmg: int = cdata["damage"] * (2 if _battle_shout_active else 1)
+	var damage: int   = base_dmg * 2             # charged = double base
+	_battle_shout_active = false
+
+	if shape == "orb":
+		_fire_wand_orb()
+		_spawn_attack_anim(true)
+		_popup("CHARGED ORB!", Color(0.70, 0.30, 1.00))
+		return
+
+	if shape == "bolt":
+		_fire_crossbow()
+		return
+
+	# Melee — charged shapes expand one tier: jab→slash, slash→wider, thrust→longer
+	var charged_shape: String = shape
+	match shape:
+		"jab":   charged_shape = "slash"
+		"slash": charged_shape = "slash"   # wider handled via damage; same tile check
+		"thrust": charged_shape = "thrust"
+
+	_start_lunge()
+	GameManager.shake(4.0, 0.22)
+	var hit_guards := _get_attack_tiles_charged(charged_shape)
+	var hit_any := false
+	for guard in hit_guards:
+		if not guard.has_method("hurt"):
+			continue
+		var was_alive: bool = is_instance_valid(guard)
+		var hit_dir: Vector2 = (guard.global_position - global_position).normalized()
+		# Check wall position BEFORE hurt (guard may be freed after)
+		var against_wall: bool = was_alive and _is_guard_against_wall(guard, hit_dir)
+		guard.hurt(damage, hit_dir)
+		hit_any = true
+		if against_wall and is_instance_valid(guard):
+			guard.hurt(1, hit_dir)
+			_popup("WALL SLAM!", Color(1.0, 0.70, 0.20))
+		if was_alive and not is_instance_valid(guard):
+			GameManager.record_takedown(true)
+			_post_kill_effects(guard, false)
+			var noise_r2: float = cdata["noise_r"]
+			if noise_r2 > 0.0:
+				GameManager.raise_wanted_level(1)
+			GameManager.check_wanted_decay(get_tree())
+
+	var noise_r: float = cdata["noise_r"]
+	if noise_r > 0.0:
+		emit_noise(NoiseLevel.LOUD)
+	else:
+		emit_noise(NoiseLevel.QUIET)
+
+	_spawn_attack_anim_charged(noise_r == 0.0)
+	_popup("CHARGED STRIKE!" if hit_any else "CHARGED!", Color(1.0, 0.85, 0.20))
+	if hit_any:
+		_trigger_hitstop()
+
+func _get_attack_tiles_charged(shape: String) -> Array:
+	var guards_hit: Array = []
+	var tile := TILE_SIZE
+	for guard in get_tree().get_nodes_in_group("guards"):
+		var to_g: Vector2 = guard.global_position - global_position
+		match shape:
+			"slash":
+				# Wider + longer arc for charged strikes
+				if to_g.length() <= tile * 2.2:
+					var angle: float = facing.angle_to(to_g.normalized())
+					if absf(angle) <= deg_to_rad(90.0):
+						guards_hit.append(guard)
+			"thrust":
+				var dist: float = to_g.dot(facing)
+				var perp: float = absf(to_g.dot(facing.rotated(PI * 0.5)))
+				if dist >= 0.0 and dist <= tile * 3.0 and perp <= tile * 0.7:
+					guards_hit.append(guard)
+			"jab":
+				var dist: float = to_g.dot(facing)
+				var perp: float = absf(to_g.dot(facing.rotated(PI * 0.5)))
+				if dist >= 0.0 and dist <= tile * 1.8 and perp <= tile * 0.9:
+					guards_hit.append(guard)
+	return guards_hit
+
+func _is_guard_against_wall(guard_node: Node, hit_dir: Vector2) -> bool:
+	if not is_instance_valid(guard_node):
+		return false
+	var push_pos: Vector2 = guard_node.global_position + hit_dir.normalized() * TILE_SIZE
+	return is_position_blocked(push_pos)
+
+func _spawn_attack_anim_charged(was_silent: bool):
+	var anim_script = load("res://WeaponAttackAnim.gd")
+	var n := Node2D.new()
+	n.set_script(anim_script)
+	get_tree().root.add_child(n)
+	n.global_position = global_position
+	n.setup(weapon, facing, was_silent)
+	n.scale = Vector2(1.6, 1.6)   # bigger anim for charged hit
+
+func _start_slide(dir: Vector2):
+	if _sprite == null:
+		return
+	# Sprite starts at the opposite end of the direction (where we came from)
+	# and slides toward zero (our new tile position)
+	_slide_from = -dir * float(TILE_SIZE)
+	_slide_t    = 1.0
+
+func _start_lunge():
+	_lunge_t = 1.0
+
+func _trigger_hitstop():
+	_hitstop_t = 0.05
 
 func _spawn_attack_anim(was_silent: bool):
 	var anim_script = load("res://WeaponAttackAnim.gd")
@@ -894,6 +1187,53 @@ func _post_kill_effects(guard, was_silent: bool):
 				g.set("detection_progress", max(0.0, cur - 0.3))
 	# Wanted level: clear if all aware guards are gone and no bodies discovered
 	GameManager.check_wanted_decay(get_tree())
+	# Room-clear bonus: if no living guards remain in the room of the kill, award +50 gp
+	_check_room_clear_bonus()
+
+func _check_room_entry():
+	var level_map = get_tree().get_first_node_in_group("levelmap")
+	if level_map == null or not level_map.has_method("_tile_to_room"):
+		return
+	var cur_room: int = level_map._tile_to_room(
+		Vector2i(int(global_position.x / 16), int(global_position.y / 16)))
+	if cur_room == _last_room or cur_room < 0:
+		return
+	_last_room = cur_room
+	# Show patrol paths of all guards currently in this room
+	for g in get_tree().get_nodes_in_group("guards"):
+		if not is_instance_valid(g):
+			continue
+		var grm: int = level_map._tile_to_room(
+			Vector2i(int(g.global_position.x / 16), int(g.global_position.y / 16)))
+		if grm == cur_room and g.has_method("start_patrol_preview"):
+			g.start_patrol_preview()
+
+func _check_room_clear_bonus():
+	var level_map = get_tree().get_first_node_in_group("levelmap")
+	if level_map == null or not level_map.has_method("_tile_to_room"):
+		return
+	var room_idx: int = level_map._tile_to_room(
+		Vector2i(int(global_position.x / 16), int(global_position.y / 16)))
+	if room_idx < 0:
+		return
+	if GameManager.cleared_rooms.size() > room_idx and GameManager.cleared_rooms[room_idx]:
+		return  # already awarded
+	for g in get_tree().get_nodes_in_group("guards"):
+		if not is_instance_valid(g):
+			continue
+		var grm: int = level_map._tile_to_room(
+			Vector2i(int(g.global_position.x / 16), int(g.global_position.y / 16)))
+		if grm == room_idx:
+			return  # living guard still in room
+	# All guards in room are cleared
+	while GameManager.cleared_rooms.size() <= room_idx:
+		GameManager.cleared_rooms.append(false)
+	if GameManager.cleared_rooms[room_idx]:
+		return
+	GameManager.cleared_rooms[room_idx] = true
+	GameManager.add_gold(50)
+	_popup("ROOM CLEARED  +50gp", Color(0.85, 0.72, 0.18))
+	GameManager.shake(1.5, 0.12)
 
 func _runed_blade_shadow_step():
 	# Find a dark tile (no torch in range) 3–6 tiles away
@@ -935,6 +1275,7 @@ func _use_class_ability():
 		"CUTPURSE":     _ability_pickpocket()
 		"SHADOWDANCER": _ability_shadow_step()
 		"ASSASSIN":     _ability_mark_target()
+		"SELLSWORD":    _ability_battle_shout()
 
 func _ability_pickpocket():
 	# Adjacent unaware guard → pickpocket
@@ -1025,6 +1366,29 @@ func _ability_mark_target():
 	else:
 		_popup("No target in sight", Color(0.55, 0.50, 0.45))
 
+func _ability_battle_shout():
+	# Stagger all guards within 64px, force them to ALERT (pulls focus to player)
+	# and grant the next melee hit double damage via a short buff
+	var shout_range := 64.0
+	var hit_count := 0
+	for guard in get_tree().get_nodes_in_group("guards"):
+		if global_position.distance_to(guard.global_position) <= shout_range:
+			if guard.has_method("stagger"):
+				guard.stagger(0.8)
+			if guard.has_method("_escalate_alert"):
+				guard._escalate_alert()
+			hit_count += 1
+	if hit_count > 0:
+		_popup("BATTLE SHOUT — %d guards staggered!" % hit_count, Color(0.90, 0.40, 0.20))
+		_battle_shout_active = true
+		GameManager.shake(3.0, 0.25)
+		emit_noise(NoiseLevel.LOUD)
+		GameManager.raise_wanted_level(1)
+	else:
+		_popup("BATTLE SHOUT — no guards in range", Color(0.55, 0.50, 0.45))
+	AudioManager.ability_use()
+	ability_cooldown = ABILITY_COOLDOWNS["SELLSWORD"] * (0.70 if GameManager.has_passive("COLD_BLOOD") else 1.0)
+
 func _ability_lucky_break():
 	# Halfling — once per floor, negate the next alert
 	if GameManager.try_use_racial_luck():
@@ -1108,6 +1472,18 @@ func _use_item(slot: int):
 					item["count"] -= 1
 			return
 
+func _throw_pebble():
+	if _pebble_cooldown > 0.0:
+		_popup("Pebble ready in %.1fs" % _pebble_cooldown, Color(0.55, 0.50, 0.40))
+		return
+	_pebble_cooldown = _PEBBLE_CD
+	var pebble := Node2D.new()
+	pebble.set_script(load("res://PebbleNode.gd"))
+	get_tree().root.add_child(pebble)
+	pebble.global_position = global_position
+	pebble.call("setup", facing, _PEBBLE_RANGE)
+	_popup("[Q] Pebble thrown", Color(0.72, 0.62, 0.38))
+
 func _throw_coin():
 	# Cutpurse gets +50% coin range
 	var tiles := 7 if GameManager.selected_class == "CUTPURSE" else 5
@@ -1187,17 +1563,39 @@ func _fire_crossbow() -> bool:
 	if best_guard:
 		_crossbow_bolts -= 1
 		var bolts_left := _crossbow_bolts if weapon != "SILENT_BOLT" else -1
-		best_guard.takedown(is_silent)
-		GameManager.record_takedown(true)
+		var is_alert: bool = best_guard.get("alert_state") == best_guard.AlertState.ALERT
+		var is_unaware: bool = best_guard.get("alert_state") == best_guard.AlertState.UNAWARE
+		var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["CROSSBOW"])
+		# Headshot bonus: +1 damage on unaware targets
+		var headshot_bonus: int = 1 if is_unaware else 0
+		if headshot_bonus > 0:
+			_popup("HEADSHOT!", Color(0.90, 0.65, 0.15))
+		if is_alert:
+			# Combat shot — deal HP damage, don't instant-kill
+			var guard_ref: Node = best_guard
+			best_guard.hurt(cdata["damage"] + headshot_bonus)
+			if not is_instance_valid(guard_ref):
+				GameManager.record_takedown(true)
+				_post_kill_effects(guard_ref, is_silent)
+				if not is_silent:
+					GameManager.raise_wanted_level(1)
+				GameManager.check_wanted_decay(get_tree())
+		else:
+			# Stealth shot — instant takedown
+			best_guard.takedown(is_silent)
+			GameManager.record_takedown(true)
+			_post_kill_effects(best_guard, is_silent)
 		if not is_silent:
 			emit_noise(NoiseLevel.LOUD)
-		_post_kill_effects(best_guard, is_silent)
-		# REPEATING_CROSSBOW: NAT20 equivalent pierce — alert adjacent guard too
+		# REPEATING_CROSSBOW: pierce on lucky shot
 		if weapon == "REPEATING_CROSSBOW" and randi_range(1, 20) == 20:
 			for g2 in get_tree().get_nodes_in_group("guards"):
 				if g2 != best_guard and best_guard.global_position.distance_to(g2.global_position) <= 24.0:
-					g2.takedown(false)
-					GameManager.record_takedown(true)
+					if g2.get("alert_state") == g2.AlertState.ALERT:
+						g2.hurt(cdata["damage"])
+					else:
+						g2.takedown(false)
+						GameManager.record_takedown(true)
 					_popup("PIERCE — double hit!", Color(0.70, 0.50, 0.28))
 					break
 		var lbl := "SILENT BOLT — %dpx" % int(bolt_range) if is_silent \
@@ -1546,6 +1944,34 @@ func _draw():
 					draw_line(base, base + f * 4.0, dagger_col, 1.0)
 					draw_line(base, base - f * 1.5, handle_col, 1.5)
 
+	# ── Charge attack buildup ────────────────────────────────────────────────────
+	if _attack_held and _attack_hold_t >= 0.12:
+		var ct: float = clamp((_attack_hold_t - 0.12) / (_CHARGE_THRESHOLD - 0.12), 0.0, 1.0)
+		var pulse: float = (sin(Engine.get_process_frames() * 0.35) + 1.0) * 0.5
+		var ring_r: float = 10.0 + ct * 6.0
+		# Outer glow
+		draw_arc(Vector2.ZERO, ring_r + 3.0, 0, TAU, 24,
+			Color(1.0, 0.85, 0.20, ct * 0.22), 4.0)
+		# Main ring
+		draw_arc(Vector2.ZERO, ring_r, 0, TAU, 24,
+			Color(1.0, 0.80, 0.10, ct * 0.60 + pulse * 0.15), 2.0)
+		if ct >= 1.0:
+			# Fully charged — bright gold flare
+			draw_arc(Vector2.ZERO, ring_r - 2.0, 0, TAU, 20,
+				Color(1.0, 1.0, 0.70, 0.55 + pulse * 0.25), 1.5)
+
+	# ── Parry window — green flash ring ─────────────────────────────────────────
+	if _parry_t > 0.0:
+		var pf: float = _parry_t / _PARRY_WINDOW
+		draw_arc(Vector2.ZERO, 10.0 + (1.0 - pf) * 3.0, 0, TAU, 20,
+			Color(0.35, 0.95, 0.45, pf * 0.70), 2.5)
+
+	# ── Dodge i-frame shimmer ────────────────────────────────────────────────────
+	if _dodge_iframes > 0.0:
+		var df: float = _dodge_iframes / _DODGE_IFRAMES
+		draw_arc(Vector2.ZERO, 9.0 + df * 3.0, 0, TAU, 20,
+			Color(0.45, 0.75, 1.0, df * 0.55), 2.0)
+
 	# ── Hit flash overlay ─────────────────────────────────────────────────────
 	if _hit_flash_timer > 0.0:
 		var hf_alpha := (_hit_flash_timer / _HIT_FLASH_DURATION) * 0.45
@@ -1584,6 +2010,7 @@ func _draw():
 				Color(0.55, 0.30, 0.95, 0.20), 1.0)
 
 func take_damage_flash():
+	GameManager.reset_combo()
 	_hit_flash_timer = _HIT_FLASH_DURATION
 	if _sprite != null:
 		_sprite.modulate = Color(1.0, 0.25, 0.25)

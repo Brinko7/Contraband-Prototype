@@ -17,6 +17,7 @@ var _wanted_label: Label     = null
 var _heat_label: Label       = null
 var _hud_panel: Control      = null   # top-left drawn panel (class/floor/HP)
 var _threat_bar: Control     = null   # threat/wanted drawn bar
+var _mini_map: Control       = null   # top-right mini-map of rooms
 var _item_boxes: Array       = []     # 3 styled item box Controls
 var _hud_t := 0.0                     # time accumulator for animations
 
@@ -89,9 +90,24 @@ func _build_runtime_ui():
 	_hud_panel.name = "HudPanel"
 	_hud_panel.set_script(load("res://HudPanel.gd"))
 	_hud_panel.position = Vector2(6, 6)
-	_hud_panel.custom_minimum_size = Vector2(224, 92)
+	_hud_panel.custom_minimum_size = Vector2(224, 108)
 	_hud_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	$Control.add_child(_hud_panel)
+
+	# ── Top-right mini-map ───────────────────────────────────────────────────
+	_mini_map = Control.new()
+	_mini_map.name = "MiniMap"
+	_mini_map.set_script(load("res://MiniMap.gd"))
+	_mini_map.anchor_top    = 0.0
+	_mini_map.anchor_bottom = 0.0
+	_mini_map.anchor_left   = 1.0
+	_mini_map.anchor_right  = 1.0
+	_mini_map.offset_left   = -100.0
+	_mini_map.offset_right  = -6.0
+	_mini_map.offset_top    = 6.0
+	_mini_map.offset_bottom = 80.0
+	_mini_map.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	$Control.add_child(_mini_map)
 
 	# ── Threat bar: wanted + heat, appears when relevant ─────────────────────
 	_threat_bar = Control.new()
@@ -507,7 +523,13 @@ func _process(delta):
 	# ── Left panel: trigger redraw (class/floor/HP) ──────────────────────────
 	if _hud_panel:
 		_hud_panel.set_meta("has_loot", has_loot)
+		_hud_panel.custom_minimum_size = Vector2(224, 124 if GameManager.combo_hits > 0 else 108)
 		_hud_panel.queue_redraw()
+
+	# ── Mini-map: trigger redraw ──────────────────────────────────────────────
+	if _mini_map:
+		_mini_map.set_meta("player", player)
+		_mini_map.queue_redraw()
 
 	# ── Threat bar: wanted + injury + heat ───────────────────────────────────
 	if _threat_bar:

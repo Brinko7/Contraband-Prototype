@@ -24,40 +24,37 @@ var C_WALL_ENTRY_E   := Color(0.44, 0.35, 0.25)
 
 # ── Torch sconce positions (world-pixel centres) ───────────────────────────────
 const TORCHES: Array[Vector2] = [
-	# Outer wall sconces
-	Vector2( 64,  40),   # Vault Left — north wall
-	Vector2(352,  40),   # Vault Centre — north wall
-	Vector2(624,  40),   # Vault Right — north wall (fogged until unlocked)
-	Vector2(  8, 256),   # Barracks left wall
-	Vector2(760, 256),   # Barracks right wall
-	Vector2(  8, 464),   # Entry left wall
-	Vector2(760, 464),   # Entry right wall
-	# Interior sconces
-	Vector2(192, 176),   # Barracks north wall, west
-	Vector2(544, 176),   # Barracks north wall, east
-	Vector2(256, 128),   # Vault Centre south face, west
-	Vector2(448, 128),   # Vault Centre south face, east
-	Vector2(192, 368),   # Entry — above west corridor exit
-	Vector2(576, 368),   # Entry — above east corridor exit
+	Vector2(256,  20),   # Vault west — north wall
+	Vector2(384,  20),   # Vault centre — north wall
+	Vector2(512,  20),   # Vault east — north wall
+	Vector2(144, 132),   # Captain's Office north wall
+	Vector2(456, 132),   # Antechamber north wall
+	Vector2(680, 132),   # Armory north wall
+	Vector2(160, 308),   # Barracks north wall
+	Vector2(600, 308),   # Storeroom north wall
+	Vector2(384, 468),   # Entry centre north wall
+	Vector2(256, 556),   # Entry south-west
+	Vector2(512, 556),   # Entry south-east
 ]
 
 # ── Room definitions (for fog-of-war tracking) ────────────────────────────────
-# Indices must match FogOfWar.ROOM_FOG_RECTS and visited_rooms.
-# 0 = Vault Left   1 = Vault Centre   2 = Vault Right
-# 3 = Barracks     4 = Entry Hall
+# 0 = Entry Foyer   1 = Barracks   2 = Storeroom
+# 3 = Captain's Office   4 = Antechamber   5 = Vault   6 = Armory
 const ROOM_TILE_RECTS: Array[Rect2i] = [
-	Rect2i( 1,  1, 12,  8),   # Vault Left   cols 1-12, rows 1-8
-	Rect2i(15,  1, 16,  8),   # Vault Centre cols 15-30, rows 1-8
-	Rect2i(33,  1, 13,  8),   # Vault Right  cols 33-45, rows 1-8
-	Rect2i( 1, 11, 46, 10),   # Barracks     cols 1-46,  rows 11-20
-	Rect2i( 1, 23, 46, 11),   # Entry Hall   cols 1-46,  rows 23-33
+	Rect2i(14, 29, 20,  6),   # Entry Foyer       cols 14-33, rows 29-34
+	Rect2i( 1, 19, 18,  9),   # Barracks          cols 1-18,  rows 19-27
+	Rect2i(29, 19, 17,  9),   # Storeroom         cols 29-45, rows 19-27
+	Rect2i( 1,  8, 16,  9),   # Captain's Office  cols 1-16,  rows 8-16
+	Rect2i(20,  8, 17,  9),   # Antechamber       cols 20-36, rows 8-16
+	Rect2i( 8,  1, 32,  6),   # Vault             cols 8-39,  rows 1-6
+	Rect2i(39,  8,  7,  9),   # Armory            cols 39-45, rows 8-16
 ]
 
 var map: Array = []
 
 # visited_rooms[i] = true once the player steps inside room i.
 # Room 4 (Entry Hall) starts visible since the player spawns there.
-var visited_rooms: Array[bool] = [false, false, false, false, true]
+var visited_rooms: Array[bool] = [true, false, false, false, false, false, false]
 
 var _t := 0.0
 var _tileset: Texture2D = null
@@ -107,33 +104,36 @@ func _build_map():
 			row.append(WALL)
 		map.append(row)
 
-	# Vault chambers
-	_carve(Rect2i( 1,  1, 12, 8))   # Vault Left
-	_carve(Rect2i(15,  1, 16, 8))   # Vault Centre
-	_carve(Rect2i(33,  1, 13, 8))   # Vault Right (LOCKED)
+	# ── Top: single vault room
+	_carve(Rect2i( 8,  1, 32,  6))   # Vault (cols 8-39, rows 1-6)
 
-	# Vault Left ↔ Vault Centre — open corridor (cols 13-14, rows 4-5)
-	_carve(Rect2i(13, 4, 2, 2))
+	# Vault ↔ mid-level corridors
+	_carve(Rect2i( 8,  6,  2,  3))   # Captain's Office → Vault (cols 8-9, rows 6-8)
+	_carve(Rect2i(26,  6,  2,  3))   # Antechamber → Vault LOCKED (cols 26-27, rows 6-8)
 
-	# Vault Centre ↔ Vault Right — LOCKED corridor (cols 31-32, rows 4-5)
-	# Tiles are carved as floor; a LockedDoor node blocks the gap in-world.
-	_carve(Rect2i(31, 4, 2, 2))
+	# ── Mid level: three rooms
+	_carve(Rect2i( 1,  8, 16,  9))   # Captain's Office (cols 1-16, rows 8-16)
+	_carve(Rect2i(20,  8, 17,  9))   # Antechamber (cols 20-36, rows 8-16)
+	_carve(Rect2i(39,  8,  7,  9))   # Armory (cols 39-45, rows 8-16)
 
-	# Vault Left  → Barracks corridor (cols 5-6, rows 9-10)
-	_carve(Rect2i(5,  9, 2, 2))
-	# Vault Centre → Barracks corridor (cols 20-21, rows 9-10)
-	_carve(Rect2i(20, 9, 2, 2))
+	# Mid-level lateral corridors
+	_carve(Rect2i(17, 11,  3,  3))   # Captain's ↔ Antechamber (cols 17-19, rows 11-13)
+	_carve(Rect2i(37, 11,  2,  3))   # Antechamber → Armory (cols 37-38, rows 11-13)
 
-	# Barracks (full width)
-	_carve(Rect2i(1, 11, 46, 10))
+	# Mid-level ↔ lower-level corridors
+	_carve(Rect2i( 8, 17,  2,  2))   # Captain's → Barracks (cols 8-9, rows 17-18)
+	_carve(Rect2i(35, 17,  2,  2))   # Antechamber → Storeroom (cols 35-36, rows 17-18)
 
-	# Barracks → Entry west corridor (cols 10-11, rows 21-22)
-	_carve(Rect2i(10, 21, 2, 2))
-	# Barracks → Entry east corridor (cols 35-36, rows 21-22)
-	_carve(Rect2i(35, 21, 2, 2))
+	# ── Lower level: two rooms
+	_carve(Rect2i( 1, 19, 18,  9))   # Barracks (cols 1-18, rows 19-27)
+	_carve(Rect2i(29, 19, 17,  9))   # Storeroom (cols 29-45, rows 19-27)
 
-	# Entry Hall
-	_carve(Rect2i(1, 23, 46, 11))
+	# Lower-level ↔ entry corridors
+	_carve(Rect2i(15, 27,  2,  2))   # Barracks → Entry (cols 15-16, rows 27-28)
+	_carve(Rect2i(31, 27,  2,  2))   # Storeroom → Entry (cols 31-32, rows 27-28)
+
+	# ── Bottom: entry foyer
+	_carve(Rect2i(14, 29, 20,  6))   # Entry Foyer (cols 14-33, rows 29-34)
 
 func _carve(rect: Rect2i):
 	for r in range(rect.position.y, rect.position.y + rect.size.y):
@@ -145,32 +145,44 @@ func _randomize_cover():
 	var rng := RandomNumberGenerator.new()
 	rng.seed = GameManager.run_seed + GameManager.current_floor * 31337
 
-	# Barracks pillar candidates (upper-left corner of each 2×2 block)
-	var bpillars := [
-		Vector2i( 3, 13), Vector2i(13, 16), Vector2i(24, 13),
-		Vector2i(33, 16), Vector2i(43, 13)
-	]
-	for p in bpillars:
-		if rng.randi_range(0, 2) != 0:   # 2/3 chance to place
-			_place_pillar(p.x, p.y)
-
-	# Entry Hall pillar candidates
-	var epillars := [
-		Vector2i( 5, 25), Vector2i(20, 29), Vector2i(38, 25), Vector2i(42, 29)
-	]
-	for p in epillars:
-		if rng.randi_range(0, 2) != 0:
-			_place_pillar(p.x, p.y)
-
-	# Vault pillar cover (single-wide, 1-tile blocks)
+	# Vault single-tile pillars (sparse, to preserve line-of-sight gameplay)
 	var vpillars := [
-		Vector2i( 3, 3), Vector2i(10, 5),   # Vault Left
-		Vector2i(18, 3), Vector2i(26, 6),   # Vault Centre
+		Vector2i(13, 3), Vector2i(21, 4), Vector2i(29, 3), Vector2i(37, 4)
 	]
 	for p in vpillars:
 		if rng.randi_range(0, 2) != 0:
 			if p.y > 0 and p.y < MAP_ROWS - 1 and p.x > 0 and p.x < MAP_COLS - 1:
 				map[p.y][p.x] = WALL
+
+	# Captain's Office 2×2 pillars
+	var capillars := [Vector2i(4, 10), Vector2i(11, 13)]
+	for p in capillars:
+		if rng.randi_range(0, 2) != 0:
+			_place_pillar(p.x, p.y)
+
+	# Antechamber 2×2 pillars
+	var antipillars := [Vector2i(22, 10), Vector2i(30, 13)]
+	for p in antipillars:
+		if rng.randi_range(0, 2) != 0:
+			_place_pillar(p.x, p.y)
+
+	# Barracks pillars
+	var bpillars := [Vector2i(3, 21), Vector2i(10, 24), Vector2i(15, 21)]
+	for p in bpillars:
+		if rng.randi_range(0, 2) != 0:
+			_place_pillar(p.x, p.y)
+
+	# Storeroom pillars
+	var spillars := [Vector2i(31, 21), Vector2i(38, 24), Vector2i(43, 21)]
+	for p in spillars:
+		if rng.randi_range(0, 2) != 0:
+			_place_pillar(p.x, p.y)
+
+	# Entry Foyer pillars (wide spacing for clear sightlines at start)
+	var epillars := [Vector2i(17, 31), Vector2i(25, 31)]
+	for p in epillars:
+		if rng.randi_range(0, 2) != 0:
+			_place_pillar(p.x, p.y)
 
 func _place_pillar(col: int, row: int):
 	for dr in range(2):
@@ -216,19 +228,20 @@ func _update_fog():
 		visited_rooms[idx] = true
 
 func _tile_to_room(tc: Vector2i) -> int:
-	if tc.y >= 23 and tc.y <= 33:  return 4   # Entry Hall
-	if tc.y >= 11 and tc.y <= 20:  return 3   # Barracks
-	if tc.y >= 1  and tc.y <= 8:
-		if tc.x >= 1  and tc.x <= 12: return 0  # Vault Left
-		if tc.x >= 15 and tc.x <= 30: return 1  # Vault Centre
-		if tc.x >= 33 and tc.x <= 45: return 2  # Vault Right
+	if tc.y >= 29 and tc.y <= 34 and tc.x >= 14 and tc.x <= 33: return 0  # Entry Foyer
+	if tc.y >= 19 and tc.y <= 27 and tc.x >=  1 and tc.x <= 18: return 1  # Barracks
+	if tc.y >= 19 and tc.y <= 27 and tc.x >= 29 and tc.x <= 45: return 2  # Storeroom
+	if tc.y >=  8 and tc.y <= 16 and tc.x >=  1 and tc.x <= 16: return 3  # Captain's Office
+	if tc.y >=  8 and tc.y <= 16 and tc.x >= 20 and tc.x <= 36: return 4  # Antechamber
+	if tc.y >=  1 and tc.y <=  6 and tc.x >=  8 and tc.x <= 39: return 5  # Vault
+	if tc.y >=  8 and tc.y <= 16 and tc.x >= 39 and tc.x <= 45: return 6  # Armory
 	return -1
 
 # ── Zone helpers ──────────────────────────────────────────────────────────────
 func _get_zone(row: int) -> int:
-	if row <= 10: return 0   # vault
-	if row <= 22: return 1   # barracks
-	return 2                  # entry
+	if row <=  7: return 0   # vault (top)
+	if row <= 28: return 1   # mid floors
+	return 2                  # entry (bottom)
 
 func _apply_floor_theme():
 	match GameManager.current_floor:
@@ -361,11 +374,13 @@ func _draw():
 		var pulse:  float = abs(sin(_t * 1.5)) * heat_a * 0.35
 		draw_rect(Rect2(0, 0, map_w, map_h), Color(0.9, 0.1, 0.05, heat_a + pulse))
 
-	# Subtle zone divider tint strips — no text, just a colour shift at the boundary
-	var vault_y := 11 * TILE_SIZE
+	# Subtle zone divider tint strips at room boundaries
+	var vault_y := 8 * TILE_SIZE    # row 8 — top of mid-level rooms
 	draw_rect(Rect2(0, vault_y - 3, map_w, 3), Color(0.22, 0.10, 0.35, 0.22))
-	var bar_y := 23 * TILE_SIZE
+	var bar_y := 19 * TILE_SIZE     # row 19 — top of barracks/storeroom
 	draw_rect(Rect2(0, bar_y - 3, map_w, 3), Color(0.10, 0.25, 0.12, 0.22))
+	var entry_y := 29 * TILE_SIZE   # row 29 — top of entry foyer
+	draw_rect(Rect2(0, entry_y - 3, map_w, 3), Color(0.15, 0.15, 0.25, 0.22))
 
 # ── Furniture collision ───────────────────────────────────────────────────────
 func _build_furniture_collision():
@@ -381,19 +396,25 @@ func _build_furniture_collision():
 		shape.position = rect.get_center()
 		body.add_child(shape)
 
-	# ── Entry Hall ────────────────────────────────────────────────────────────
-	_add.call(Rect2(152, 368, 20, 24))
-	_add.call(Rect2(528, 368, 20, 24))
-	_add.call(Rect2(16,  432, 24, 36))   # west crate stack (moved down, clear of paths)
-	_add.call(Rect2(704, 432, 24, 36))   # east crate stack
+	# ── Entry Foyer — guard booths
+	_add.call(Rect2(280, 472, 20, 24))
+	_add.call(Rect2(444, 472, 20, 24))
 
-	# ── Barracks ──────────────────────────────────────────────────────────────
-	# Beds hug the north wall — collision is just the frame (not footlocker) so
-	# guards can stand beside them without clipping.
-	for bx: float in [48.0, 112.0, 192.0, 368.0, 464.0, 560.0, 640.0]:
-		_add.call(Rect2(bx, 180, 24, 14))
-	# Weapon rack — narrow, north-west corner only
-	_add.call(Rect2(18, 208, 12, 48))
+	# ── Barracks — beds along north wall
+	for bx: float in [32.0, 80.0, 128.0, 176.0, 240.0]:
+		_add.call(Rect2(bx, 316, 24, 14))
+	_add.call(Rect2(20, 340, 12, 48))   # weapon rack
+
+	# ── Storeroom — crate stacks
+	for cx: float in [480.0, 544.0, 608.0, 672.0]:
+		_add.call(Rect2(cx, 340, 24, 24))
+
+	# ── Captain's Office — desk
+	_add.call(Rect2(80, 200, 32, 16))
+
+	# ── Armory — weapon racks
+	_add.call(Rect2(636, 148, 12, 48))
+	_add.call(Rect2(636, 220, 12, 48))
 
 # ── Zone labels ──────────────────────────────────────────────────────────────
 func _draw_zone_labels(font: Font):
@@ -401,22 +422,14 @@ func _draw_zone_labels(font: Font):
 	var label_col := Color(0.55, 0.50, 0.40, 0.38)
 	var loot_col  := Color(0.72, 0.60, 0.28, 0.55)
 	var sz := 9
-	# Entry hall label
-	draw_string(font, Vector2(320, 540), "— THE ENTRY HALL —",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	# Barracks label
-	draw_string(font, Vector2(310, 345), "— THE BARRACKS —",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	# Vault labels
-	draw_string(font, Vector2(32, 145), "VAULT I",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(288, 145), "VAULT II",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(550, 145), "INNER VAULT",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	# Named target hint near primary vault
-	draw_string(font, Vector2(256, 20), loot_name,
-		HORIZONTAL_ALIGNMENT_LEFT, -1, sz, loot_col)
+	draw_string(font, Vector2(308, 540), "— THE ENTRY FOYER —",    HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2( 32, 430), "— BARRACKS —",           HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(492, 430), "— STOREROOM —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2( 22, 258), "CAPTAIN'S OFFICE",       HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(345, 258), "ANTECHAMBER",            HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(634, 258), "ARMORY",                 HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(320, 100), "— THE VAULT —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(256,  20), loot_name,                HORIZONTAL_ALIGNMENT_LEFT, -1, sz, loot_col)
 
 # ── Room furniture ────────────────────────────────────────────────────────────
 func _draw_room_furniture():
@@ -424,104 +437,105 @@ func _draw_room_furniture():
 		return
 	_draw_entry_furniture()
 	_draw_barracks_furniture()
-	_draw_vault_left_furniture()
-	_draw_vault_centre_furniture()
-	_draw_vault_right_furniture()
+	_draw_storeroom_furniture()
+	_draw_captain_furniture()
+	_draw_vault_furniture()
+	_draw_armory_furniture()
 
 func _tex(tex: Texture2D, dest: Rect2):
 	draw_texture_rect(tex, dest, false)
 
 func _draw_entry_furniture():
-	# Guard booths
-	for bx in [152.0, 528.0]:
-		_tex(_tex_booth, Rect2(bx, 368, 20, 24))
-	# Crate stacks
-	for cx in [16.0, 704.0]:
-		_tex(_tex_crate, Rect2(cx, 432, 24, 36))
-	# Notice boards
-	for nx in [88.0, 640.0]:
-		_tex(_tex_board, Rect2(nx, 508, 22, 16))
+	# Guard booths flanking the north entrances
+	_tex(_tex_booth, Rect2(280, 472, 20, 24))
+	_tex(_tex_booth, Rect2(444, 472, 20, 24))
+	# Notice boards on south wall
+	for nx in [252.0, 472.0]:
+		_tex(_tex_board, Rect2(nx, 544, 22, 16))
 
 func _draw_barracks_furniture():
-	# Beds along north wall
-	for bx: float in [48, 112, 192, 368, 464, 560, 640]:
-		_tex(_tex_bed, Rect2(bx, 180, 24, 22))
-	# Communal table — tile the 32px sprite across 288px width
-	var tx := 240.0
-	while tx < 528.0:
-		var tw := minf(32.0, 528.0 - tx)
-		_tex(_tex_table, Rect2(tx, 262, tw, 16))
+	# Beds along north wall (5 bunks)
+	for bx: float in [32, 80, 128, 176, 240]:
+		_tex(_tex_bed, Rect2(bx, 316, 24, 22))
+	# Communal table
+	var tx := 40.0
+	while tx < 280.0:
+		var tw := minf(32.0, 280.0 - tx)
+		_tex(_tex_table, Rect2(tx, 388, tw, 16))
 		tx += 32.0
-	# Benches — tile above and below table
-	for bench_y in [250.0, 280.0]:
-		var bx2 := 248.0
-		while bx2 < 520.0:
-			var bw := minf(32.0, 520.0 - bx2)
+	# Benches above and below table
+	for bench_y in [376.0, 406.0]:
+		var bx2 := 48.0
+		while bx2 < 272.0:
+			var bw := minf(32.0, 272.0 - bx2)
 			_tex(_tex_bench, Rect2(bx2, bench_y, bw, 8))
 			bx2 += 32.0
-	# Weapon rack
-	_tex(_tex_rack, Rect2(18, 208, 12, 48))
+	# Weapon rack in NW corner
+	_tex(_tex_rack, Rect2(20, 340, 12, 48))
 
-func _draw_vault_left_furniture():
-	# Stone plinths — placed below items so they don't block pickups at y=80
-	for px2 in [48.0, 144.0]:
-		_tex(_tex_plinth, Rect2(px2, 96, 18, 14))
-	# Cobwebs in NW and NE corners
-	var web := Color(0.45, 0.42, 0.50, 0.30)
-	_draw_cobweb(Vector2(18, 18),  Vector2( 1,  1), web)
-	_draw_cobweb(Vector2(190, 18), Vector2(-1,  1), web)
-	# Ancient rune carvings on north wall
-	var rune := Color(0.50, 0.42, 0.60, 0.45)
-	for i in range(4):
-		var rx := 32.0 + i * 38.0
-		draw_circle(Vector2(rx, 20), 2.5, rune)
-		draw_line(Vector2(rx - 3, 20), Vector2(rx + 3, 20), rune, 0.8)
-		draw_line(Vector2(rx, 17), Vector2(rx, 23), rune, 0.8)
+func _draw_storeroom_furniture():
+	# Crate stacks in rows
+	for cx: float in [480, 544, 608, 672]:
+		_tex(_tex_crate, Rect2(cx, 340, 24, 24))
+	for cx: float in [496, 560, 624]:
+		_tex(_tex_crate, Rect2(cx, 406, 24, 24))
 
-func _draw_vault_centre_furniture():
-	# Animated glow aura
+func _draw_captain_furniture():
+	# Captain's desk with chair
+	_tex(_tex_table, Rect2(80, 200, 32, 16))
+	_tex(_tex_bench, Rect2(88, 218, 16, 8))
+	# Evidence plinth
+	_tex(_tex_plinth, Rect2(28, 158, 18, 14))
+	# Rune carvings on north wall — office has been here a long time
+	var rune := Color(0.50, 0.38, 0.28, 0.40)
+	for i in range(3):
+		var rx := 32.0 + i * 48.0
+		draw_circle(Vector2(rx, 136), 2.0, rune)
+		draw_line(Vector2(rx - 3, 136), Vector2(rx + 3, 136), rune, 0.7)
+		draw_line(Vector2(rx, 133), Vector2(rx, 139), rune, 0.7)
+
+func _draw_vault_furniture():
+	# Animated glow aura at vault centre
 	var glow := Color(0.65, 0.45, 0.85, 0.18 + abs(sin(_t * 1.2)) * 0.08)
-	draw_circle(Vector2(352, 72), 22.0, glow)
-	# Grand plinth sprite — centred, below the loot target at y=48
-	_tex(_tex_plinth, Rect2(343, 80, 18, 14))
+	draw_circle(Vector2(384, 56), 28.0, glow)
+	# Grand plinth
+	_tex(_tex_plinth, Rect2(375, 64, 18, 14))
 	# Floor inlay diamond
 	var inlay := Color(C_FLOOR_VAULT_A.r + 0.05, C_FLOOR_VAULT_A.g + 0.03, C_FLOOR_VAULT_A.b + 0.08, 0.70)
 	var pts := PackedVector2Array([
-		Vector2(352, 44), Vector2(392, 72),
-		Vector2(352, 100), Vector2(312, 72),
+		Vector2(384, 28), Vector2(440, 56),
+		Vector2(384, 84), Vector2(328, 56),
 	])
 	draw_colored_polygon(pts, Color(inlay.r, inlay.g, inlay.b, 0.12))
 	draw_polyline(pts + PackedVector2Array([pts[0]]), Color(inlay.r, inlay.g, inlay.b, 0.30), 0.8)
+	# Side altar to the east
+	var altar_glow := Color(0.85, 0.70, 0.30, 0.12 + abs(sin(_t * 0.8)) * 0.06)
+	draw_circle(Vector2(572, 56), 20.0, altar_glow)
+	_tex(_tex_altar, Rect2(555, 44, 36, 24))
 	# Wall bracket sconces
 	var bracket := Color(0.40, 0.30, 0.50)
-	for sx in [262.0, 442.0]:
-		draw_rect(Rect2(sx, 16, 10, 6), bracket)
-		draw_line(Vector2(sx + 5, 16), Vector2(sx + 5, 22), bracket, 1.5)
-
-func _draw_vault_right_furniture():
-	# Animated altar glow
-	var altar_glow := Color(0.85, 0.70, 0.30, 0.14 + abs(sin(_t * 0.8)) * 0.08)
-	draw_circle(Vector2(624, 64), 28.0, altar_glow)
-	# Altar sprite — pushed toward north wall, loot spawns at y=48 so altar at y=68
-	_tex(_tex_altar, Rect2(604, 68, 40, 26))
-	# Treasure pile clusters in NW and NE corners
+	for sx in [166.0, 586.0]:
+		draw_rect(Rect2(sx, 20, 10, 6), bracket)
+		draw_line(Vector2(sx + 5, 20), Vector2(sx + 5, 26), bracket, 1.5)
+	# Cobwebs in vault corners
+	var web := Color(0.45, 0.42, 0.50, 0.30)
+	_draw_cobweb(Vector2(130, 18),  Vector2( 1,  1), web)
+	_draw_cobweb(Vector2(638, 18),  Vector2(-1,  1), web)
+	# Gold treasure pile clusters
 	var gold  := Color(0.85, 0.68, 0.15)
 	var gold2 := Color(0.70, 0.52, 0.10)
-	for corner in [Vector2(544, 28), Vector2(700, 28)]:
-		for ci in range(6):
-			var cr := 2.0 + (ci % 3) * 1.2
-			var co := Vector2(float(ci % 3) * 6 - 6, float(ci / 3) * 5)
+	for corner in [Vector2(168, 28), Vector2(600, 28)]:
+		for ci in range(5):
+			var cr := 1.8 + (ci % 3) * 1.0
+			var co := Vector2(float(ci % 3) * 5 - 5, float(ci / 3) * 4)
 			draw_circle(corner + co, cr, gold if ci % 2 == 0 else gold2)
-	# Ornate floor
-	var orn := Color(C_FLOOR_VAULT_A.r + 0.06, C_FLOOR_VAULT_A.g + 0.04, C_FLOOR_VAULT_A.b + 0.10, 0.25)
-	for ri in range(3):
-		var margin := float(ri * 10 + 8)
-		draw_rect(Rect2(533 + margin, 18 + margin, 192 - margin * 2, 112 - margin * 2), orn, false, 0.8)
 
-	# Cobwebs in corners (inner sanctum feels ancient)
-	var web := Color(0.55, 0.50, 0.42, 0.28)
-	_draw_cobweb(Vector2(534, 18),  Vector2( 1,  1), web)
-	_draw_cobweb(Vector2(718, 18),  Vector2(-1,  1), web)
+func _draw_armory_furniture():
+	# Weapon racks along east wall
+	_tex(_tex_rack, Rect2(636, 148, 12, 48))
+	_tex(_tex_rack, Rect2(636, 220, 12, 48))
+	# Storage crate
+	_tex(_tex_crate, Rect2(648, 200, 24, 20))
 
 func _draw_cobweb(origin: Vector2, dir: Vector2, col: Color):
 	for i in range(4):

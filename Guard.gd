@@ -70,10 +70,21 @@ var _convo_timer := 0.0
 # Key drop — if >= 0 the guard carries a key for the matching LockedDoor
 var key_id: int = -1
 
+# Weapon drop — weapon this guard carries; "NONE" means no drop
+var dropped_weapon: String = "NONE"
+
 # HP system
 var guard_hp:     int = 2
 var guard_max_hp: int = 2
-var _hurt_flash_t: float = 0.0
+var _hurt_flash_t:   float   = 0.0
+var _knockback_dir:  Vector2 = Vector2.ZERO
+var _knockback_t:    float   = 0.0
+const _KNOCKBACK_DUR: float  = 0.14
+const _KNOCKBACK_PX:  float  = 6.0
+
+# Patrol path preview — briefly shown when player enters this guard's room
+var _path_preview_t: float = 0.0
+const _PATH_PREVIEW_DUR: float = 3.5
 
 func _ready():
 	add_to_group("guards")
@@ -85,6 +96,16 @@ func _ready():
 	_original_patrol = patrol_points.duplicate()
 	guard_max_hp = 4 if is_boss else (3 if is_captain else 2)
 	guard_hp     = guard_max_hp
+	# Assign dropped weapon based on guard type / role
+	if is_boss:
+		dropped_weapon = "LONGSWORD"
+	elif is_captain:
+		dropped_weapon = "LONGSWORD"
+	elif enemy_type == EnemyType.GNOLL:
+		dropped_weapon = "SPEAR"
+	elif enemy_type == EnemyType.HUMAN and randi_range(1, 10) <= 4:
+		dropped_weapon = "SHIV"
+	# Goblin and Skeleton drop nothing
 	_sprite = Sprite2D.new()
 	_sprite.texture = _ENEMY_SHEET
 	_sprite.hframes = 8
@@ -131,8 +152,19 @@ func _process(delta):
 	if GameManager.state != GameManager.State.PLAYING:
 		return
 	_anim_t += delta
+	if _path_preview_t > 0.0:
+		_path_preview_t -= delta
+		queue_redraw()
 	if _hurt_flash_t > 0.0:
 		_hurt_flash_t -= delta
+		queue_redraw()
+	if _knockback_t > 0.0:
+		_knockback_t -= delta
+		if _sprite != null:
+			var env: float = _knockback_t / _KNOCKBACK_DUR
+			_sprite.position = _knockback_dir * _KNOCKBACK_PX * env * env
+		if _knockback_t <= 0.0 and _sprite != null:
+			_sprite.position = Vector2.ZERO
 		queue_redraw()
 	# Hold Person
 	if _is_held:
@@ -226,6 +258,11 @@ func _update_detection(delta):
 		if GameManager.has_passive("HALFLING_SLOW_DETECT"): fill_mult *= 1.20
 		if GameManager.has_gear_effect("SET_THIEF"):       fill_mult *= 1.15
 		fill_mult /= GameManager.get_wanted_detection_mult()
+		# Dark zone: player near snuffed torch is harder to detect
+		for tn in get_tree().get_nodes_in_group("torches"):
+			if not tn.get("is_lit") and player.global_position.distance_to(tn.global_position) <= 48.0:
+				fill_mult *= 1.65   # detection fills ~40% slower in darkness
+				break
 		detection_progress = min(1.0, detection_progress + delta * (1.0 / rate) / fill_mult)
 		if detection_progress > 0.5 and not _detect_tick_played:
 			_detect_tick_played = true
@@ -344,24 +381,38 @@ func _update_patrol(delta):
 	_step_toward(target_world, _get_move_interval())
 
 var _hit_cooldown := 0.0   # prevents rapid multi-hit from same guard
+var _pre_attack_t := 0.0   # telegraph window before guard swings (parryable)
 
 func _update_chase(delta):
 	if player == null:
 		return
 	if _is_stunned:
 		return
+	# Telegraph countdown — fires attack when it expires
+	if _pre_attack_t > 0.0:
+		_pre_attack_t -= delta
+		if _pre_attack_t <= 0.0:
+			# Check if player successfully parried
+			var player_parry: float = player.get("_parry_t") if player.get("_parry_t") != null else 0.0
+			if player_parry > 0.0:
+				# Parried! Signal the player to riposte
+				if player.has_method("_parry_riposte"):
+					player.call("_parry_riposte", self)
+				_popup("PARRIED!", Color(0.35, 0.95, 0.55))
+			else:
+				# Hit lands
+				var dmg := 3 if get("is_boss") == true else 2
+				if player.has_method("take_damage_flash"):
+					player.take_damage_flash()
+				GameManager.take_damage(dmg)
+				_popup("HIT -%d HP" % dmg, Color(1.0, 0.20, 0.20))
+		queue_redraw()
+		return
 	_hit_cooldown = max(0.0, _hit_cooldown - delta)
 	if global_position.distance_to(player.global_position) <= TILE_SIZE:
 		if _hit_cooldown <= 0.0:
-			_hit_cooldown = 1.2   # 1.2s between hits from this guard
-			var dmg := 2
-			# Bosses hit harder
-			if get("is_boss") == true:
-				dmg = 3
-			if player.has_method("take_damage_flash"):
-				player.take_damage_flash()
-			GameManager.take_damage(dmg)
-			_popup("HIT -%d HP" % dmg, Color(1.0, 0.20, 0.20))
+			_hit_cooldown = 1.4   # full cooldown (telegraph time + recovery)
+			_pre_attack_t = 0.22  # 0.22s telegraph window — press attack to parry
 		return
 	move_timer -= delta
 	if move_timer > 0.0:
@@ -413,6 +464,9 @@ func _check_vision():
 		return
 	# Hidden player cannot be seen
 	if player.get("is_hidden") == true:
+		return
+	# Dodge roll i-frames: guard can't lock on during roll
+	if player.get("_dodge_iframes") != null and float(player.get("_dodge_iframes")) > 0.0:
 		return
 	# Wood Elf vanish
 	if GameManager._vanish_active:
@@ -520,6 +574,39 @@ func _escalate_alert():
 						g._escalate_alert()
 					elif dist <= 180.0 and g.has_method("_become_suspicious"):
 						g._become_suspicious(alarm_pos)
+			# Panic lockdown: if 2+ guards in same room are now ALERT, alert all roommates
+			_check_panic_lockdown(alarm_pos)
+
+func _check_panic_lockdown(alarm_pos: Vector2):
+	var level_map = get_tree().get_first_node_in_group("levelmap")
+	if level_map == null:
+		return
+	var my_tile := Vector2i(int(global_position.x / 16), int(global_position.y / 16))
+	var my_room: int = level_map._tile_to_room(my_tile) if level_map.has_method("_tile_to_room") else -1
+	if my_room < 0:
+		return
+	var alerted_count := 0
+	for g in get_tree().get_nodes_in_group("guards"):
+		if not is_instance_valid(g):
+			continue
+		var groom: int = level_map._tile_to_room(
+			Vector2i(int(g.global_position.x / 16), int(g.global_position.y / 16)))
+		if groom == my_room and g.get("alert_state") == AlertState.ALERT:
+			alerted_count += 1
+	if alerted_count >= 2:
+		for g in get_tree().get_nodes_in_group("guards"):
+			if not is_instance_valid(g) or g == self:
+				continue
+			var groom: int = level_map._tile_to_room(
+				Vector2i(int(g.global_position.x / 16), int(g.global_position.y / 16)))
+			if groom == my_room and g.get("alert_state") != AlertState.ALERT:
+				if g.has_method("_escalate_alert"):
+					g._escalate_alert()
+
+func start_patrol_preview():
+	if not patrol_points.is_empty():
+		_path_preview_t = _PATH_PREVIEW_DUR
+		queue_redraw()
 
 func resist_takedown():
 	alert_state = AlertState.ALERT
@@ -542,11 +629,40 @@ func stagger(duration: float):
 	_stun_timer = duration
 	_popup("STAGGERED", Color(0.90, 0.55, 0.15))
 
-func hurt(damage: int):
+func hurt(damage: int, hit_dir: Vector2 = Vector2.ZERO):
 	guard_hp -= damage
-	_hurt_flash_t = 0.18
+	_hurt_flash_t = 0.22
+
+	# Knockback twitch away from hit direction
+	if hit_dir != Vector2.ZERO:
+		_knockback_dir  = hit_dir.normalized()
+		_knockback_t    = _KNOCKBACK_DUR
+	elif player != null:
+		var away: Vector2 = (global_position - player.global_position).normalized()
+		_knockback_dir  = away
+		_knockback_t    = _KNOCKBACK_DUR
+
 	stagger(0.30)
 	_escalate_alert()
+
+	# Spawn damage number
+	var dmg_script = load("res://DamageNumber.gd")
+	var dmg_node   := Node2D.new()
+	dmg_node.set_script(dmg_script)
+	get_tree().root.add_child(dmg_node)
+	dmg_node.global_position = global_position + Vector2(randf_range(-4.0, 4.0), -14.0)
+	var dmg_col: Color = Color(1.0, 0.20, 0.20) if guard_hp > 0 else Color(1.0, 0.90, 0.20)
+	dmg_node.setup(damage, dmg_col)
+
+	# Hit sparks at impact point
+	var spark_script = load("res://HitSpark.gd")
+	var spark_node   := Node2D.new()
+	spark_node.set_script(spark_script)
+	get_tree().root.add_child(spark_node)
+	spark_node.global_position = global_position
+	var spark_col: Color = Color(1.0, 0.65, 0.20)
+	spark_node.setup(spark_col, _knockback_dir)
+
 	queue_redraw()
 	if guard_hp <= 0:
 		takedown(false)
@@ -575,6 +691,7 @@ func takedown(attacker_is_sneaking: bool, is_dart: bool = false):
 		GameManager.record_boss_kill()
 		_popup("%s ELIMINATED — +300gp" % GameManager.boss_name, Color(0.95, 0.78, 0.15))
 		GameManager.shake(6.0, 0.5)
+	_spawn_death_effects()
 	_spawn_body()
 	queue_free()
 
@@ -593,6 +710,32 @@ func _popup(text: String, color: Color):
 	p.global_position = global_position + Vector2(0, -22)
 	get_tree().root.add_child(p)
 
+func _spawn_death_effects():
+	# Dropped weapon — player can pick it up
+	if dropped_weapon != "NONE":
+		var drop_script = load("res://DroppedWeapon.gd")
+		var drop        := Node2D.new()
+		drop.set_script(drop_script)
+		get_tree().root.add_child(drop)
+		drop.global_position = global_position + Vector2(randf_range(-4, 4), randf_range(-4, 4))
+		drop.call("setup", dropped_weapon)
+
+	# Blood pool — persists on the floor
+	var pool_script = load("res://BloodPool.gd")
+	var pool        := Node2D.new()
+	pool.set_script(pool_script)
+	get_tree().root.add_child(pool)
+	pool.global_position = global_position
+
+	# Death burst — radial explosion
+	var burst_script = load("res://DeathBurst.gd")
+	var burst        := Node2D.new()
+	burst.set_script(burst_script)
+	get_tree().root.add_child(burst)
+	burst.global_position = global_position
+	var bcol := Color(1.0, 0.20, 0.10) if not is_boss else Color(1.0, 0.55, 0.05)
+	burst.setup(bcol)
+
 func _spawn_body():
 	var body := Node2D.new()
 	body.set_script(_body_script)
@@ -605,6 +748,26 @@ func _draw():
 	var half_angle    := deg_to_rad(vision_angle / 2.0)
 	var facing_angle  := facing.angle()
 	var perp          := facing.rotated(PI * 0.5).normalized()
+
+	# ── Patrol path preview — faint dotted route, fades over time ────────────
+	if _path_preview_t > 0.0 and patrol_points.size() >= 2:
+		var fade: float = _path_preview_t / _PATH_PREVIEW_DUR
+		var col := Color(0.80, 0.72, 0.28, fade * 0.55)
+		for i in range(patrol_points.size()):
+			var from: Vector2 = patrol_points[i] - position
+			var to: Vector2   = patrol_points[(i + 1) % patrol_points.size()] - position
+			# Dashed line: draw short segments
+			var seg_dir: Vector2 = (to - from).normalized()
+			var total_len: float = from.distance_to(to)
+			var drawn: float = 0.0
+			while drawn < total_len:
+				var seg_start := from + seg_dir * drawn
+				var seg_end   := from + seg_dir * min(drawn + 4.0, total_len)
+				draw_line(seg_start, seg_end, col, 1.0)
+				drawn += 8.0
+		# Waypoint dots
+		for wp in patrol_points:
+			draw_circle(wp - position, 2.0, Color(0.95, 0.85, 0.35, fade * 0.70))
 
 	# ── Footprint trail ────────────────────────────────────────────────────────
 	for i in range(_footprints.size()):
@@ -646,6 +809,15 @@ func _draw():
 				  else Color(1.0, 0.42, 0.0)
 		draw_rect(Rect2(-bw * 0.5, by, bw * detection_progress, bh), fc)
 		draw_rect(Rect2(-bw * 0.5, by, bw, bh), Color(0.5, 0.5, 0.5, 0.5), false, 0.5)
+
+	# ── Parry telegraph — orange ring flashes before guard swings ─────────────
+	if _pre_attack_t > 0.0:
+		var frac: float = _pre_attack_t / 0.22   # 1.0→0.0 as window closes
+		var pulse_r := 10.0 + (1.0 - frac) * 4.0
+		draw_arc(Vector2.ZERO, pulse_r, 0, TAU, 20,
+			Color(1.0, 0.45, 0.0, 0.55 + frac * 0.35), 2.5)
+		draw_arc(Vector2.ZERO, pulse_r - 2.0, 0, TAU, 16,
+			Color(1.0, 0.75, 0.1, frac * 0.40), 1.0)
 
 	# ── Hold Person / Stun overlay ─────────────────────────────────────────────
 	if _is_held:
