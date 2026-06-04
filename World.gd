@@ -32,6 +32,9 @@ var _reinforcements_spawned := 0
 # Player spawn: Vector2(384, 512) — col 24, row 32 (Entry Foyer centre)
 
 func _ready():
+	# 2:1 isometric projection — X goes right+down, Y goes left+down
+	transform = Transform2D(Vector2(1.0, 0.5), Vector2(-1.0, 0.5), Vector2.ZERO)
+
 	GameManager.pick_floor_complication()
 	GameManager.pick_floor_objective()
 	GameManager.start_floor_timer()

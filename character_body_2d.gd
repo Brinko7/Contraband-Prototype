@@ -167,7 +167,7 @@ func _ready():
 func _setup_camera():
 	var cam := get_node_or_null("Camera2D") as Camera2D
 	if cam:
-		cam.zoom = Vector2(3.0, 3.0)
+		cam.zoom = Vector2(2.0, 2.0)
 		cam.position_smoothing_enabled = true
 		cam.position_smoothing_speed   = 8.0
 
