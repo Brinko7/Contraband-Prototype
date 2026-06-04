@@ -791,12 +791,21 @@ func _draw():
 		var fp := _footprints[i] - position
 		draw_circle(fp, 1.8, Color(0.0, 0.0, 0.0, fade))
 
-	# ── Vision cone — two-layer gradient look ─────────────────────────────────
+	# ── Vision cone — three-layer atmospheric gradient ─────────────────────────
 	var cr: float; var cg: float; var cb: float
+	var base_alpha: float
+	var pulse_speed: float
 	match alert_state:
-		AlertState.UNAWARE:    cr=0.95; cg=0.95; cb=0.20
-		AlertState.SUSPICIOUS: cr=1.00; cg=0.55; cb=0.05
-		AlertState.ALERT:      cr=1.00; cg=0.10; cb=0.10
+		AlertState.UNAWARE:
+			cr=0.85; cg=0.78; cb=0.45; base_alpha=0.03; pulse_speed=0.0
+		AlertState.SUSPICIOUS:
+			cr=0.90; cg=0.70; cb=0.15; base_alpha=0.07; pulse_speed=2.0
+		AlertState.ALERT:
+			cr=0.90; cg=0.15; cb=0.10; base_alpha=0.12; pulse_speed=5.0
+		_:
+			cr=0.95; cg=0.95; cb=0.20; base_alpha=0.05; pulse_speed=0.0
+	var cone_extra_pulse: float = abs(sin(_anim_t * pulse_speed)) * base_alpha * 0.6 if pulse_speed > 0.0 else 0.0
+	base_alpha += cone_extra_pulse
 	# Detection pulse — cone brightens as bar fills
 	var detect_boost := detection_progress * 0.15
 	var cone_pulse: float = abs(sin(_anim_t * 4.0)) * detection_progress * 0.06
@@ -906,241 +915,1096 @@ func _draw():
 
 
 func _draw_guard_svg(f: Vector2, perp: Vector2):
-	var t := _anim_t
-	# Alert state colors
-	var alert_tint := Color.WHITE
-	if alert_state == AlertState.SUSPICIOUS:
-		alert_tint = Color(1.0, 0.88, 0.60)
-	elif alert_state == AlertState.ALERT:
-		alert_tint = Color(1.0, 0.75, 0.72)
-	var hurt_flash := _hurt_flash_t > 0.0
-	if hurt_flash:
-		alert_tint = Color(1.0, 0.38, 0.38)
-
-	var moving := move_timer <= 0.04 or alert_state == AlertState.ALERT
-	var leg_swing := sin(t * 11.0) * 2.0 if moving else 0.0
-	var bob       := sin(t * 11.0) * 0.45 if moving else 0.0
-	var scale     := 1.35 if is_boss else (1.18 if is_captain else 1.0)
-
 	match enemy_type:
-		EnemyType.HUMAN:
-			_draw_human_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
-		EnemyType.SKELETON:
-			_draw_skeleton_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
-		EnemyType.GOBLIN:
-			_draw_goblin_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
-		EnemyType.GNOLL:
-			_draw_gnoll_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
-		_:
-			_draw_human_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+		EnemyType.HUMAN:    _draw_human_svg(f, perp)
+		EnemyType.SKELETON: _draw_skeleton_svg(f, perp)
+		EnemyType.GOBLIN:   _draw_goblin_svg(f, perp)
+		EnemyType.GNOLL:    _draw_gnoll_svg(f, perp)
+		_:                  _draw_human_svg(f, perp)
 
-func _draw_human_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
-	var a := tint.a
-	# Shadow
-	draw_circle(Vector2(0.3, 1.5) * sc, 5.0 * sc, Color(0.0, 0.0, 0.0, 0.20))
-	# Cape/tabard
-	var cape_l := -f * 0.8 + perp * 4.0 * sc
-	var cape_r := -f * 0.8 - perp * 4.0 * sc
-	var cape_tip := -f * 9.5 * sc + Vector2(0, bob * 0.2)
-	var tabard_col := Color(0.25, 0.30, 0.48)  # faction dark blue
-	if alert_state == AlertState.ALERT: tabard_col = Color(0.48, 0.25, 0.25)
-	draw_colored_polygon(PackedVector2Array([cape_l, cape_r, cape_tip]),
-		Color(tabard_col.r * 0.55, tabard_col.g * 0.55, tabard_col.b * 0.60, 0.85))
-	# Legs
-	var leg_l := perp * 2.5 * sc + f * (-3.5 + ls * 0.3) + Vector2(0, bob)
-	var leg_r := -perp * 2.5 * sc + f * (-3.5 - ls * 0.3) + Vector2(0, -bob)
-	var boot_c := Color(0.22, 0.18, 0.12)
-	draw_circle(leg_l + f * 1.2, 1.5 * sc, boot_c)
-	draw_circle(leg_r + f * 1.2, 1.5 * sc, boot_c)
-	draw_circle(leg_l, 1.8 * sc, boot_c.darkened(0.2))
-	draw_circle(leg_r, 1.8 * sc, boot_c.darkened(0.2))
-	# Body — chainmail + tabard
-	var body := Vector2(0, bob * 0.2) * sc
-	draw_circle(body, 4.8 * sc, Color(0.40, 0.38, 0.42))  # chainmail
-	draw_colored_polygon(PackedVector2Array([
-		body + f * 1.5 + perp * 2.5 * sc,
-		body + f * 1.5 - perp * 2.5 * sc,
-		body - f * 2.5 - perp * 2.2 * sc,
-		body - f * 2.5 + perp * 2.2 * sc]),
-		tabard_col)  # tabard overlay
-	# Chainmail highlight
-	draw_circle(body - f * 1.0 + perp * 1.0, 1.4 * sc, Color(0.65, 0.63, 0.68, 0.35))
-	# Arms
-	draw_circle(body + perp * 5.2 * sc, 1.5 * sc, Color(0.40, 0.38, 0.42))
-	draw_circle(body - perp * 5.2 * sc, 1.5 * sc, Color(0.40, 0.38, 0.42))
-	# Spear/weapon in leading hand
-	var spear_base := body + perp * 5.5 * sc + f * 0.5
-	draw_line(spear_base, spear_base + f * 9.0 * sc, Color(0.50, 0.38, 0.20), 1.2)
-	draw_line(spear_base + f * 9.0 * sc, spear_base + f * 9.0 * sc + f * 2.5 * sc,
-		Color(0.72, 0.70, 0.75), 1.6)  # spearhead
-	# Helmet
-	var head_p := f * 3.8 * sc + Vector2(0, bob * 0.4)
-	draw_circle(head_p, 3.2 * sc, Color(0.48, 0.44, 0.50))  # helmet base
-	draw_arc(head_p, 3.2 * sc, f.angle() - PI * 0.85, f.angle() + PI * 0.85, 12,
-		Color(0.58, 0.54, 0.62), 1.8 * sc)  # helmet rim
-	# Visor slit
-	draw_line(head_p + f * 2.0 - perp * 1.5 * sc,
-		head_p + f * 2.0 + perp * 1.5 * sc,
-		Color(0.12, 0.10, 0.12, 0.80), 0.8)
-	# Alert eye-glow through visor
+# ─────────────────────────────────────────────────────────────────────────────
+# SHARED ART HELPERS — isometric 3/4 perspective primitives
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _iso_box(center: Vector2, f: Vector2, perp2: Vector2, fwd_size: float, side_size: float, height: float, base_col: Color):
+	# 3-face isometric box: top (lightened), front (base), shadow side (darkened)
+	var top: Vector2 = Vector2(0, -height)
+	var front_bl: Vector2 = center + (-perp2 * side_size) + (f * fwd_size * 0.0)
+	var front_br: Vector2 = center + (perp2 * side_size)
+	var front_tl: Vector2 = front_bl + top
+	var front_tr: Vector2 = front_br + top
+	var back_tl: Vector2 = front_tl + (f * -fwd_size)
+	var back_tr: Vector2 = front_tr + (f * -fwd_size)
+	# Front face
+	draw_colored_polygon(PackedVector2Array([front_bl, front_br, front_tr, front_tl]), base_col)
+	# Top face (lightened)
+	draw_colored_polygon(PackedVector2Array([front_tl, front_tr, back_tr, back_tl]), base_col.lightened(0.20))
+	# Shadow side (always perp2-positive edge gets the shadow band)
+	var shadow_col: Color = base_col.darkened(0.35)
+	draw_line(front_br, front_tr, shadow_col, 1.2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HUMAN — IRON GUARD
+# Heavy armored medieval sentry. Chainmail, tabard, full helm, spear.
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _draw_human_svg(f: Vector2, perp2: Vector2):
+	var sc: float = 1.35 if is_boss else (1.18 if is_captain else 1.0)
+	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var leg_swing: float = (sin(_anim_t * 7.0) * 2.0 * sc) if moving else 0.0
+	var bob: float = (sin(_anim_t * 7.0) * 0.4 * sc) if moving else 0.0
+
+	# 1. Ground shadow — elongated along facing
+	var shadow_pts: PackedVector2Array = PackedVector2Array()
+	for i in range(14):
+		var a: float = float(i) / 14.0 * TAU
+		var sx: float = cos(a) * 6.5 * sc
+		var sy: float = sin(a) * 3.2 * sc
+		shadow_pts.append(f * sx + perp2 * sy + Vector2(0.5, 2.0) * sc)
+	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.30))
+
+	# Tabard color by alert state
+	var tabard_col: Color = Color(0.28, 0.32, 0.42)
+	if alert_state == AlertState.SUSPICIOUS:
+		tabard_col = Color(0.45, 0.38, 0.18)
+	elif alert_state == AlertState.ALERT:
+		tabard_col = Color(0.65, 0.12, 0.12)
+
+	var armor_col: Color = Color(0.25, 0.25, 0.28)
+	var chain_col: Color = Color(0.35, 0.33, 0.38)
+	var metal_pauld: Color = Color(0.30, 0.28, 0.34)
+
+	# 2. Back armored leg
+	var back_leg_top: Vector2 = -f * 0.5 - perp2 * 2.2 * sc + Vector2(0, -2.5 * sc)
+	var back_leg_bot: Vector2 = -f * (1.5 + leg_swing * 0.3) - perp2 * 2.2 * sc + Vector2(0, 3.0 * sc + bob)
+	_draw_armored_leg(back_leg_top, back_leg_bot, perp2, sc, armor_col.darkened(0.15))
+
+	# 3. Hip + tabard skirt
+	var hip_c: Vector2 = Vector2(0, -1.5 * sc) + Vector2(0, bob * 0.3)
+	# Tabard skirt — two flaps
+	var skirt_top_l: Vector2 = hip_c + perp2 * 2.5 * sc + Vector2(0, -0.5 * sc)
+	var skirt_top_r: Vector2 = hip_c - perp2 * 2.5 * sc + Vector2(0, -0.5 * sc)
+	var skirt_bot_l: Vector2 = hip_c + perp2 * 3.2 * sc + Vector2(0, 3.5 * sc)
+	var skirt_bot_r: Vector2 = hip_c - perp2 * 3.2 * sc + Vector2(0, 3.5 * sc)
+	var skirt_mid: Vector2 = hip_c + Vector2(0, 4.0 * sc)
+	draw_colored_polygon(PackedVector2Array([skirt_top_l, skirt_mid, skirt_bot_l]),
+		tabard_col.darkened(0.25))
+	draw_colored_polygon(PackedVector2Array([skirt_top_r, skirt_bot_r, skirt_mid]),
+		tabard_col.darkened(0.25))
+	draw_colored_polygon(PackedVector2Array([skirt_top_l, skirt_top_r, skirt_mid]),
+		tabard_col)
+
+	# 4. Torso — chainmail isometric box
+	var torso_c: Vector2 = Vector2(0, -5.5 * sc) + Vector2(0, bob * 0.4)
+	_draw_human_torso(torso_c, f, perp2, sc, chain_col, tabard_col)
+
+	# 5. Front armored leg
+	var front_leg_top: Vector2 = f * 0.5 + perp2 * 2.2 * sc + Vector2(0, -2.5 * sc)
+	var front_leg_bot: Vector2 = f * (1.5 - leg_swing * 0.3) + perp2 * 2.2 * sc + Vector2(0, 3.0 * sc - bob)
+	_draw_armored_leg(front_leg_top, front_leg_bot, perp2, sc, armor_col)
+
+	# 6. Shoulder pauldrons
+	var shoulder_l: Vector2 = torso_c + perp2 * 3.8 * sc + Vector2(0, -2.5 * sc)
+	var shoulder_r: Vector2 = torso_c - perp2 * 3.8 * sc + Vector2(0, -2.5 * sc)
+	_draw_pauldron(shoulder_l, f, perp2, sc, metal_pauld, true)
+	_draw_pauldron(shoulder_r, f, perp2, sc, metal_pauld.darkened(0.15), false)
+
+	# 7. Arms
+	# Off-hand arm (back / left)
+	var hand_l: Vector2 = shoulder_l + perp2 * 0.5 * sc + Vector2(0, 4.0 * sc)
+	draw_line(shoulder_l, hand_l, chain_col.darkened(0.15), 2.0 * sc)
+	draw_circle(hand_l, 1.3 * sc, metal_pauld)
+	# Spear hand (front / right)
+	var hand_r: Vector2 = shoulder_r - perp2 * 0.2 * sc + Vector2(0, 3.5 * sc)
+	draw_line(shoulder_r, hand_r, chain_col.darkened(0.15), 2.0 * sc)
+	draw_circle(hand_r, 1.4 * sc, metal_pauld.darkened(0.15))
+
+	# 8. Helmet
+	var head_c: Vector2 = Vector2(0, -10.5 * sc) + Vector2(0, bob * 0.5)
+	_draw_human_helmet(head_c, f, perp2, sc, tabard_col)
+
+	# 9. Spear in front hand
+	_draw_spear(hand_r, f, perp2, sc)
+
+	# 10. Alert aura
 	if alert_state == AlertState.ALERT:
-		draw_line(head_p + f * 2.0 - perp * 1.2 * sc,
-			head_p + f * 2.0 + perp * 1.2 * sc,
-			Color(1.0, 0.28, 0.08, 0.80), 0.7)
-	# Helmet plume (Captain/Boss distinction)
-	if is_captain or is_boss:
-		var plume_col := Color(0.85, 0.65, 0.10) if is_boss else Color(0.82, 0.18, 0.18)
+		var pulse_r: float = (8.0 + sin(_anim_t * 5.0) * 1.2) * sc
+		draw_arc(head_c, pulse_r, 0, TAU, 20,
+			Color(1.0, 0.12, 0.08, 0.20 + sin(_anim_t * 5.0) * 0.10), 1.8)
+
+func _draw_armored_leg(top: Vector2, bot: Vector2, perp2: Vector2, sc: float, col: Color):
+	var w_top: float = 1.6 * sc
+	var w_bot: float = 1.2 * sc
+	var pts := PackedVector2Array([
+		top + perp2 * w_top,
+		top - perp2 * w_top,
+		bot - perp2 * w_bot,
+		bot + perp2 * w_bot,
+	])
+	draw_colored_polygon(pts, col)
+	# Top highlight
+	draw_line(top + perp2 * w_top, top - perp2 * w_top, col.lightened(0.25), 0.8)
+	# Shadow side
+	draw_line(top - perp2 * w_top, bot - perp2 * w_bot, col.darkened(0.40), 0.6)
+	# Boot
+	var boot_pts := PackedVector2Array([
+		bot + perp2 * w_bot * 1.4,
+		bot - perp2 * w_bot * 1.4,
+		bot - perp2 * w_bot * 1.4 + Vector2(0, 1.5 * sc),
+		bot + perp2 * w_bot * 1.6 + Vector2(0, 1.5 * sc),
+	])
+	draw_colored_polygon(boot_pts, Color(0.16, 0.12, 0.08))
+	draw_line(boot_pts[0], boot_pts[1], Color(0.30, 0.22, 0.14), 0.6)
+
+func _draw_human_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, chain_col: Color, tabard_col: Color):
+	var w: float = 4.0 * sc
+	var h: float = 5.5 * sc
+	# Front chainmail face
+	var fl: Vector2 = c + Vector2(-w, h * 0.5)
+	var fr: Vector2 = c + Vector2(w, h * 0.5)
+	var tr: Vector2 = c + Vector2(w * 0.9, -h * 0.5)
+	var tl: Vector2 = c + Vector2(-w * 0.9, -h * 0.5)
+	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), chain_col)
+	# Top face (shoulders)
+	draw_colored_polygon(PackedVector2Array([
+		tl, tr,
+		tr + f * -2.0 * sc, tl + f * -2.0 * sc,
+	]), chain_col.lightened(0.20))
+	# Shadow side band
+	draw_line(fr, tr, chain_col.darkened(0.40), 1.4)
+	# Chainmail dots — texture pattern on front
+	for ix in range(3):
+		for iy in range(4):
+			var dot: Vector2 = c + Vector2(-w * 0.55 + ix * w * 0.55, -h * 0.35 + iy * h * 0.22)
+			draw_circle(dot, 0.45, chain_col.lightened(0.30))
+	# Tabard front overlay — vertical strip
+	var tab_w: float = w * 0.45
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-tab_w, h * 0.5),
+		c + Vector2(tab_w, h * 0.5),
+		c + Vector2(tab_w * 0.9, -h * 0.4),
+		c + Vector2(-tab_w * 0.9, -h * 0.4),
+	]), tabard_col)
+	# Tabard centerline
+	draw_line(c + Vector2(0, h * 0.5), c + Vector2(0, -h * 0.4), tabard_col.darkened(0.30), 0.5)
+	# Trim — boss=gold, captain=silver
+	if is_boss:
+		var gold: Color = Color(0.88, 0.70, 0.18)
+		draw_line(fl, fr, gold, 0.8)
+		draw_line(tl, tr, gold, 0.6)
+		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), gold, 0.6)
+		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), gold, 0.6)
+	elif is_captain:
+		var silver: Color = Color(0.72, 0.70, 0.78)
+		draw_line(fl, fr, silver, 0.7)
+		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), silver, 0.5)
+		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), silver, 0.5)
+
+func _draw_pauldron(c: Vector2, f: Vector2, perp2: Vector2, sc: float, col: Color, is_lit: bool):
+	var r: float = 2.2 * sc
+	var pts := PackedVector2Array([
+		c + Vector2(-r, 0.2 * sc),
+		c + Vector2(-r * 0.7, -r * 0.9),
+		c + Vector2(r * 0.4, -r),
+		c + Vector2(r, -r * 0.3),
+		c + Vector2(r * 0.8, r * 0.4),
+	])
+	draw_colored_polygon(pts, col)
+	# Top highlight
+	if is_lit:
+		draw_line(pts[1], pts[2], col.lightened(0.35), 0.7)
+		draw_line(pts[2], pts[3], col.lightened(0.20), 0.5)
+	else:
+		draw_line(pts[3], pts[4], col.darkened(0.30), 0.6)
+	# Rivets
+	draw_circle(c + Vector2(0, -r * 0.4), 0.4, col.lightened(0.45))
+	draw_circle(c + Vector2(r * 0.4, r * 0.1), 0.35, col.darkened(0.30))
+
+func _draw_human_helmet(c: Vector2, f: Vector2, perp2: Vector2, sc: float, tabard_col: Color):
+	var helm_col: Color = Color(0.28, 0.26, 0.32)
+	var w: float = 3.4 * sc
+	var h: float = 4.2 * sc
+	# Helmet base — front face
+	var fl: Vector2 = c + Vector2(-w, h * 0.5)
+	var fr: Vector2 = c + Vector2(w, h * 0.5)
+	var tr: Vector2 = c + Vector2(w * 0.85, -h * 0.5)
+	var tl: Vector2 = c + Vector2(-w * 0.85, -h * 0.5)
+	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), helm_col)
+	# Top face
+	draw_colored_polygon(PackedVector2Array([
+		tl, tr,
+		tr + Vector2(-0.8 * sc, -1.3 * sc),
+		tl + Vector2(0.8 * sc, -1.3 * sc),
+	]), helm_col.lightened(0.20))
+	# Shadow side
+	draw_line(fr, tr, helm_col.darkened(0.40), 1.2)
+	# Visor slit
+	var visor_y: float = c.y + h * 0.0
+	draw_rect(Rect2(c.x - w * 0.75, visor_y - 0.6, w * 1.5, 1.2),
+		Color(0.06, 0.06, 0.08))
+	# Glowing eyes inside visor
+	var eye_col: Color
+	match alert_state:
+		AlertState.UNAWARE:
+			eye_col = Color(0.65, 0.58, 0.20, 0.6)
+		AlertState.SUSPICIOUS:
+			var p: float = 0.9 + sin(_anim_t * 4.0) * 0.1
+			eye_col = Color(0.90 * p, 0.55 * p, 0.10 * p, 0.95)
+		AlertState.ALERT:
+			eye_col = Color(1.0, 0.15, 0.10)
+			# Outer glow arc
+			draw_arc(c + Vector2(0, 0), w * 1.1, 0, TAU, 16,
+				Color(1.0, 0.20, 0.10, 0.25 + sin(_anim_t * 6.0) * 0.10), 1.2)
+		_:
+			eye_col = Color(0.5, 0.5, 0.5)
+	draw_circle(c + Vector2(-w * 0.45, visor_y - c.y), 0.55 * sc, eye_col)
+	draw_circle(c + Vector2(w * 0.45, visor_y - c.y), 0.55 * sc, eye_col)
+	# Brow ridge (lightened top of visor)
+	draw_line(fl + Vector2(0.4, -0.4), fr + Vector2(-0.4, -0.4), helm_col.lightened(0.30), 0.6)
+	# Captain plume
+	if is_captain and not is_boss:
+		var plume_col: Color = Color(0.82, 0.18, 0.18)
+		var base: Vector2 = c + Vector2(0, -h * 0.5)
+		for i in range(5):
+			var t_p: float = float(i) / 4.0
+			var sway: float = sin(_anim_t * 5.0 + t_p * 2.0) * 1.5
+			var p1: Vector2 = base + Vector2(sway * t_p, -t_p * 5.0 * sc)
+			var p2: Vector2 = base + Vector2(sway * t_p - 0.8 * sc, -t_p * 5.0 * sc - 1.2 * sc)
+			draw_line(p1, p2, plume_col, 1.6 - t_p)
+			draw_line(p1, p2 + Vector2(1.6 * sc, 0), plume_col.darkened(0.20), 1.2 - t_p)
+	# Boss crown
+	if is_boss:
+		var gold: Color = Color(0.92, 0.74, 0.18)
+		var base: Vector2 = c + Vector2(0, -h * 0.5 - 0.6 * sc)
+		# Three crown spikes
 		for i in range(3):
-			var pp := head_p + f * -0.5 - perp * (1.0 - i * 1.0) * sc
-			draw_line(pp, pp - f * 4.0 * sc + Vector2(0, -1.0 + sin(t * 6.0 + i) * 0.5),
-				plume_col, 1.2)
+			var off_x: float = (i - 1) * w * 0.55
+			var spike := PackedVector2Array([
+				base + Vector2(off_x - 0.8 * sc, 0),
+				base + Vector2(off_x, -2.2 * sc),
+				base + Vector2(off_x + 0.8 * sc, 0),
+			])
+			draw_colored_polygon(spike, gold)
+			# Gem
+			draw_circle(base + Vector2(off_x, -1.4 * sc), 0.5 * sc, Color(0.95, 0.15, 0.20))
+		draw_line(base + Vector2(-w, 0), base + Vector2(w, 0), gold, 1.0)
 
-func _draw_skeleton_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
-	var bone_w := Color(0.88, 0.85, 0.78)
-	var bone_d := Color(0.62, 0.58, 0.52)
-	var eye_c  := Color(0.90, 0.15, 0.05) if alert_state == AlertState.ALERT else Color(0.22, 0.22, 0.32)
-	# Shadow
-	draw_circle(Vector2(0.3, 1.5) * sc, 4.5 * sc, Color(0.0, 0.0, 0.0, 0.18))
-	# Legs (bones)
-	var leg_l := perp * 2.2 * sc + f * (-3.2 + ls * 0.3) + Vector2(0, bob)
-	var leg_r := -perp * 2.2 * sc + f * (-3.2 - ls * 0.3) + Vector2(0, -bob)
-	draw_line(leg_l - f * 2.0, leg_l + f * 1.5, bone_d, 1.4)
-	draw_line(leg_r - f * 2.0, leg_r + f * 1.5, bone_d, 1.4)
-	draw_circle(leg_l + f * 1.5, 1.2 * sc, bone_w)
-	draw_circle(leg_r + f * 1.5, 1.2 * sc, bone_w)
-	# Ribcage
-	var body := Vector2(0, bob * 0.18)
-	draw_circle(body, 4.5 * sc, bone_d)
-	# Rib lines
+func _draw_spear(hand: Vector2, f: Vector2, perp2: Vector2, sc: float):
+	var shaft_col: Color = Color(0.42, 0.28, 0.14)
+	var tip: Vector2 = hand + Vector2(0, -14.0 * sc)
+	var butt: Vector2 = hand + Vector2(0, 4.0 * sc)
+	# Shaft
+	draw_line(butt, tip, shaft_col, 1.2)
+	draw_line(butt + Vector2(0.4, 0), tip + Vector2(0.4, 0), shaft_col.lightened(0.20), 0.4)
+	# Spearhead
+	var head_col: Color = Color(0.72, 0.70, 0.78)
+	var head_base: Vector2 = tip + Vector2(0, 2.0 * sc)
+	var head_pts := PackedVector2Array([
+		head_base + Vector2(-1.3 * sc, 0),
+		tip + Vector2(0, -2.5 * sc),
+		head_base + Vector2(1.3 * sc, 0),
+		head_base,
+	])
+	draw_colored_polygon(head_pts, head_col)
+	draw_line(head_pts[0], head_pts[1], head_col.lightened(0.35), 0.5)
+	draw_line(head_pts[1], head_pts[2], head_col.darkened(0.30), 0.5)
+	# Cross-guard
+	draw_line(head_base + Vector2(-1.5 * sc, 0), head_base + Vector2(1.5 * sc, 0), Color(0.55, 0.42, 0.18), 0.6)
+	# Butt cap
+	draw_circle(butt, 0.7 * sc, Color(0.55, 0.42, 0.18))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SKELETON — UNDEAD GUARD
+# Visible ribs, hollow eye sockets with eerie glow, tattered armor scraps.
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _draw_skeleton_svg(f: Vector2, perp2: Vector2):
+	var sc: float = 1.0
+	var bone_col: Color = Color(0.85, 0.82, 0.72)
+	var bone_dark: Color = Color(0.62, 0.58, 0.48)
+	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var rattle: float = 0.5 if moving else 0.2
+
+	# Independent jitter per limb
+	var rattle_l: Vector2 = Vector2(sin(_anim_t * 13.5) * rattle, cos(_anim_t * 11.2) * rattle * 0.6)
+	var rattle_r: Vector2 = Vector2(cos(_anim_t * 12.1) * rattle, sin(_anim_t * 14.7) * rattle * 0.6)
+	var rattle_h: Vector2 = Vector2(sin(_anim_t * 9.3) * rattle * 0.4, cos(_anim_t * 7.5) * rattle * 0.4)
+
+	# 1. Faint shadow
+	var shadow_pts: PackedVector2Array = PackedVector2Array()
+	for i in range(12):
+		var a: float = float(i) / 12.0 * TAU
+		shadow_pts.append(Vector2(cos(a) * 5.0, sin(a) * 2.4) + Vector2(0.3, 2.0))
+	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.18))
+
+	# Spine anchor (center reference)
+	var spine_bot: Vector2 = Vector2(0, 1.0) + rattle_h * 0.3
+	var spine_top: Vector2 = Vector2(0, -7.5) + rattle_h * 0.5
+
+	# 2. Bare leg bones
+	_draw_skeleton_leg(Vector2(-1.8, -1.0) + rattle_l, Vector2(-2.2, 5.5) + rattle_l, bone_col, bone_dark)
+	_draw_skeleton_leg(Vector2(1.8, -1.0) + rattle_r, Vector2(2.2, 5.5) + rattle_r, bone_col, bone_dark)
+
+	# 3. Pelvis
+	var pelvis_pts := PackedVector2Array([
+		Vector2(-2.5, -2.0) + spine_bot,
+		Vector2(2.5, -2.0) + spine_bot,
+		Vector2(1.8, 0.5) + spine_bot,
+		Vector2(-1.8, 0.5) + spine_bot,
+	])
+	draw_colored_polygon(pelvis_pts, bone_col)
+	draw_line(pelvis_pts[0], pelvis_pts[1], bone_col.lightened(0.20), 0.6)
+	# Pelvic gap
+	draw_line(spine_bot + Vector2(0, -1.5), spine_bot + Vector2(0, 0.3), bone_dark.darkened(0.30), 0.6)
+
+	# 4. RIBCAGE
+	var spine_center: Vector2 = (spine_bot + spine_top) * 0.5
+	_draw_skeleton_ribs(spine_center, bone_col, bone_dark)
+
+	# Spine column
+	for i in range(6):
+		var sy: float = lerp(spine_top.y, spine_bot.y, float(i) / 5.0)
+		draw_circle(Vector2(spine_center.x, sy), 0.6, bone_col)
+		draw_line(Vector2(spine_center.x - 0.7, sy), Vector2(spine_center.x + 0.7, sy), bone_dark, 0.4)
+
+	# 5. Shoulder girdle (clavicles)
+	var neck: Vector2 = spine_top + Vector2(0, 0.5)
+	draw_line(neck, neck + Vector2(-4.2, 0.3), bone_col, 1.0)
+	draw_line(neck, neck + Vector2(4.2, 0.3), bone_col, 1.0)
+	draw_circle(neck + Vector2(-4.2, 0.3), 0.7, bone_col)
+	draw_circle(neck + Vector2(4.2, 0.3), 0.7, bone_col)
+
+	# Decayed armor scrap on shoulder (one side only)
+	var scrap_col: Color = Color(0.28, 0.26, 0.30)
+	draw_colored_polygon(PackedVector2Array([
+		neck + Vector2(-5.2, -0.5),
+		neck + Vector2(-2.8, -1.0),
+		neck + Vector2(-2.5, 1.4),
+		neck + Vector2(-5.4, 1.0),
+	]), scrap_col)
+	draw_line(neck + Vector2(-5.2, -0.5), neck + Vector2(-2.8, -1.0), scrap_col.lightened(0.20), 0.4)
+
+	# 6. Arm bones
+	_draw_skeleton_arm(neck + Vector2(-4.2, 0.3) + rattle_l * 0.5, true, bone_col, bone_dark)
+	_draw_skeleton_arm(neck + Vector2(4.2, 0.3) + rattle_r * 0.5, false, bone_col, bone_dark)
+
+	# Cracked chestplate fragment
+	draw_colored_polygon(PackedVector2Array([
+		spine_center + Vector2(-2.5, -2.5),
+		spine_center + Vector2(2.8, -1.8),
+		spine_center + Vector2(2.0, 1.0),
+		spine_center + Vector2(-1.5, 0.5),
+		spine_center + Vector2(-2.8, -0.5),
+	]), scrap_col.darkened(0.10))
+	# Crack lines
+	draw_line(spine_center + Vector2(-1.0, -2.2), spine_center + Vector2(0.5, 0.8), Color(0.10, 0.08, 0.08), 0.5)
+	draw_line(spine_center + Vector2(1.2, -1.5), spine_center + Vector2(0.8, -0.3), Color(0.10, 0.08, 0.08), 0.4)
+
+	# Tattered cloth scraps
+	var cloth_col: Color = Color(0.35, 0.30, 0.20, 0.65)
 	for i in range(3):
-		var rib_y := body + Vector2(0, (-1.2 + i * 1.3) * sc)
-		draw_line(rib_y - perp * 3.5 * sc, rib_y + perp * 3.5 * sc, bone_w, 0.9)
-	# Spine
-	draw_line(body + f * 2.0, body - f * 4.0, bone_d, 1.0)
-	# Arms (bone rods)
-	var arm_l := body + perp * 5.0 * sc
-	var arm_r := body - perp * 5.0 * sc
-	draw_line(arm_l - f * 1.5, arm_l + f * 2.0, bone_w, 1.2)
-	draw_line(arm_r - f * 1.5, arm_r + f * 2.0, bone_w, 1.2)
-	draw_circle(arm_l + f * 2.0, 1.0 * sc, bone_w)
-	draw_circle(arm_r + f * 2.0, 1.0 * sc, bone_w)
-	# Skull
-	var skull := f * 4.0 * sc + Vector2(0, bob * 0.35)
-	draw_circle(skull, 3.4 * sc, bone_d)
-	draw_circle(skull + f * 0.5, 3.0 * sc, bone_w)
+		var ox: float = (i - 1) * 2.0
+		var sway: float = sin(_anim_t * 1.8 + float(i)) * 0.8
+		draw_colored_polygon(PackedVector2Array([
+			spine_center + Vector2(ox - 0.8, 1.5),
+			spine_center + Vector2(ox + 0.8, 1.5),
+			spine_center + Vector2(ox + 0.5 + sway, 4.5),
+			spine_center + Vector2(ox - 0.6 + sway, 4.5),
+		]), cloth_col)
+
+	# 7. Skull
+	var skull_pos: Vector2 = spine_top + Vector2(0, -5.5) + rattle_h
+	_draw_skeleton_skull(skull_pos, bone_col, bone_dark)
+
+	# 9. Rusty sword in right hand
+	var hand_r: Vector2 = neck + Vector2(4.2, 0.3) + Vector2(2.5, 4.0) + rattle_r * 0.5
+	_draw_rusty_sword(hand_r)
+
+func _draw_skeleton_leg(hip: Vector2, ankle: Vector2, bone_col: Color, bone_dark: Color):
+	var knee: Vector2 = (hip + ankle) * 0.5 + Vector2(sign(hip.x) * 0.3, 0)
+	# Femur
+	draw_line(hip, knee, bone_col, 1.5)
+	# Knee joint
+	draw_circle(knee, 1.1, bone_col)
+	draw_circle(knee + Vector2(-0.3, -0.3), 0.4, bone_col.lightened(0.30))
+	# Tibia
+	draw_line(knee, ankle, bone_dark, 1.2)
+	# Foot — L-shape
+	var foot_pts := PackedVector2Array([
+		ankle + Vector2(-0.6, 0),
+		ankle + Vector2(0.6, 0),
+		ankle + Vector2(2.0, 1.0),
+		ankle + Vector2(2.0, 1.8),
+		ankle + Vector2(-0.4, 1.5),
+	])
+	draw_colored_polygon(foot_pts, bone_col)
+	draw_line(foot_pts[0], foot_pts[1], bone_col.lightened(0.20), 0.4)
+
+func _draw_skeleton_arm(shoulder: Vector2, is_left: bool, bone_col: Color, bone_dark: Color):
+	var side: float = -1.0 if is_left else 1.0
+	var elbow: Vector2 = shoulder + Vector2(side * 1.2, 2.5)
+	var wrist: Vector2 = shoulder + Vector2(side * 2.5, 4.0)
+	draw_line(shoulder, elbow, bone_col, 1.2)
+	draw_circle(elbow, 0.9, bone_col)
+	draw_line(elbow, wrist, bone_dark, 1.0)
+	# Hand — 3 phalanges
+	for i in range(3):
+		var fo: Vector2 = wrist + Vector2(side * (0.4 + i * 0.6), 0.6 + i * 0.3)
+		draw_line(wrist, fo, bone_col, 0.6)
+		draw_circle(fo, 0.35, bone_col)
+
+func _draw_skeleton_ribs(spine_center: Vector2, bone_col: Color, bone_dark: Color):
+	for i in range(5):
+		var rib_y: float = -2.0 + float(i) * 1.4
+		var rib_r: float = 3.0 + float(i) * 0.2
+		var center: Vector2 = spine_center + Vector2(0, rib_y)
+		# Dark gap behind rib (depth)
+		draw_arc(center, rib_r - 0.4, PI * 0.55, PI * 1.05, 6,
+			Color(0.20, 0.18, 0.16, 0.5), 1.6)
+		draw_arc(center, rib_r - 0.4, -PI * 0.05, PI * 0.45, 6,
+			Color(0.20, 0.18, 0.16, 0.5), 1.6)
+		# Bright rib
+		draw_arc(center, rib_r, PI * 0.55, PI * 1.05, 6, bone_col, 1.2)
+		draw_arc(center, rib_r, -PI * 0.05, PI * 0.45, 6, bone_col, 1.2)
+
+func _draw_skeleton_skull(c: Vector2, bone_col: Color, bone_dark: Color):
+	# Cranium
+	draw_circle(c, 4.5, bone_col)
+	# Highlight (top-left)
+	draw_circle(c + Vector2(-1.3, -1.5), 2.2, bone_col.lightened(0.25))
+	# Shadow side arc
+	draw_arc(c, 4.5, -PI * 0.1, PI * 0.6, 8, bone_col.darkened(0.30), 0.8)
+	# Jaw — open death grin
+	var jaw_pts := PackedVector2Array([
+		c + Vector2(-2.8, 1.0),
+		c + Vector2(2.8, 1.0),
+		c + Vector2(2.2, 3.5),
+		c + Vector2(-2.2, 3.5),
+	])
+	draw_colored_polygon(jaw_pts, bone_col.darkened(0.10))
+	draw_line(jaw_pts[2], jaw_pts[3], bone_dark.darkened(0.30), 0.5)
+	# Dark mouth gap
+	draw_rect(Rect2(c.x - 2.4, c.y + 1.2, 4.8, 1.4), Color(0.06, 0.05, 0.06))
+	# Teeth — 5 small rectangles
+	for i in range(5):
+		var tx: float = c.x - 2.0 + float(i) * 1.0
+		draw_rect(Rect2(tx, c.y + 1.3, 0.7, 1.0), Color(0.92, 0.88, 0.78))
+	# Nose cavity
+	var nose := PackedVector2Array([
+		c + Vector2(0, -0.5),
+		c + Vector2(-0.8, 0.7),
+		c + Vector2(0.8, 0.7),
+	])
+	draw_colored_polygon(nose, Color(0.06, 0.05, 0.06))
 	# Eye sockets
-	var eye_l := skull + f * 1.8 + perp * 1.3 * sc
-	var eye_r := skull + f * 1.8 - perp * 1.3 * sc
-	draw_circle(eye_l, 1.0 * sc, Color(0.08, 0.06, 0.08))
-	draw_circle(eye_r, 1.0 * sc, Color(0.08, 0.06, 0.08))
-	draw_circle(eye_l, 0.55 * sc, eye_c)
-	draw_circle(eye_r, 0.55 * sc, eye_c)
-	# Jaw
-	draw_arc(skull + f * 1.5, 2.0 * sc, f.angle() - 0.7, f.angle() + 0.7, 8, bone_d, 1.0)
-	draw_line(skull + f * 1.5 + perp * 1.0 * sc, skull + f * 3.0 + perp * 0.8 * sc, bone_w, 0.7)
-	draw_line(skull + f * 1.5 - perp * 1.0 * sc, skull + f * 3.0 - perp * 0.8 * sc, bone_w, 0.7)
+	draw_circle(c + Vector2(-1.7, -1.0), 1.4, Color(0.05, 0.04, 0.05))
+	draw_circle(c + Vector2(1.7, -1.0), 1.4, Color(0.05, 0.04, 0.05))
+	# Glowing pupils
+	var eye_col: Color
+	match alert_state:
+		AlertState.UNAWARE:
+			eye_col = Color(0.2, 0.4, 0.8, 0.6)
+		AlertState.SUSPICIOUS:
+			eye_col = Color(0.15, 0.85, 0.95)
+		AlertState.ALERT:
+			eye_col = Color(0.05, 1.0, 0.3)
+			# Outer glow
+			draw_arc(c + Vector2(-1.7, -1.0), 2.4, 0, TAU, 14,
+				Color(0.10, 1.0, 0.30, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.2)
+			draw_arc(c + Vector2(1.7, -1.0), 2.4, 0, TAU, 14,
+				Color(0.10, 1.0, 0.30, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.2)
+		_:
+			eye_col = Color(0.3, 0.5, 0.6)
+	draw_circle(c + Vector2(-1.7, -1.0), 0.7, eye_col)
+	draw_circle(c + Vector2(1.7, -1.0), 0.7, eye_col)
+	# Cranial suture line
+	draw_line(c + Vector2(-2.5, -2.5), c + Vector2(2.5, -2.5), bone_dark, 0.4)
+	draw_line(c + Vector2(0, -4.0), c + Vector2(0, -2.3), bone_dark, 0.4)
 
-func _draw_goblin_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
-	var skin_g := Color(0.28, 0.52, 0.22)
-	var leather := Color(0.35, 0.22, 0.10)
-	# Shadow (small and hunched)
-	draw_circle(Vector2(0.3, 1.0) * sc, 4.0 * sc, Color(0.0, 0.0, 0.0, 0.18))
-	# Legs
-	var leg_l := perp * 2.0 * sc + f * (-2.8 + ls * 0.4) + Vector2(0, bob)
-	var leg_r := -perp * 2.0 * sc + f * (-2.8 - ls * 0.4) + Vector2(0, -bob)
-	draw_circle(leg_l + f * 1.0, 1.4 * sc, skin_g.darkened(0.2))
-	draw_circle(leg_r + f * 1.0, 1.4 * sc, skin_g.darkened(0.2))
-	# Hunched body
-	var body := f * 0.6 + Vector2(0, bob * 0.2)
-	draw_circle(body, 4.2 * sc, leather.darkened(0.15))
-	draw_circle(body + f * 0.5, 3.5 * sc, skin_g)
-	draw_circle(body + f * 0.8 - f * 2.2, 2.0 * sc, skin_g.lightened(0.08))  # belly hump
-	# Arms (long and dangling)
-	draw_line(body + perp * 4.2 * sc - f * 1.0, body + perp * 3.5 * sc + f * 4.0, skin_g, 1.3)
-	draw_line(body - perp * 4.2 * sc - f * 1.0, body - perp * 3.5 * sc + f * 4.0, skin_g, 1.3)
-	draw_circle(body + perp * 3.5 * sc + f * 4.0, 1.2 * sc, skin_g.lightened(0.08))  # claws
-	draw_circle(body - perp * 3.5 * sc + f * 4.0, 1.2 * sc, skin_g.lightened(0.08))
-	# Big-eared head
-	var head_p := f * 3.5 * sc + Vector2(0, bob * 0.3)
-	draw_circle(head_p, 3.0 * sc, skin_g)
-	# Big pointy ears
-	draw_colored_polygon(PackedVector2Array([
-		head_p + perp * 2.5 * sc,
-		head_p + perp * 6.5 * sc + f * -1.0 * sc,
-		head_p + perp * 2.8 * sc - f * 1.5 * sc]),
-		skin_g.darkened(0.12))
-	draw_colored_polygon(PackedVector2Array([
-		head_p - perp * 2.5 * sc,
-		head_p - perp * 6.5 * sc + f * -1.0 * sc,
-		head_p - perp * 2.8 * sc - f * 1.5 * sc]),
-		skin_g.darkened(0.12))
-	# Beady eyes
-	draw_circle(head_p + f * 2.0 + perp * 1.0 * sc, 0.8 * sc, Color(0.08, 0.05, 0.05))
-	draw_circle(head_p + f * 2.0 - perp * 1.0 * sc, 0.8 * sc, Color(0.08, 0.05, 0.05))
-	var eye_c := Color(0.95, 0.22, 0.05) if alert_state == AlertState.ALERT else Color(0.85, 0.72, 0.18)
-	draw_circle(head_p + f * 2.0 + perp * 1.0 * sc, 0.45 * sc, eye_c)
-	draw_circle(head_p + f * 2.0 - perp * 1.0 * sc, 0.45 * sc, eye_c)
-	# Fangs
-	draw_line(head_p + f * 2.5 + perp * 0.5 * sc, head_p + f * 3.5 + perp * 0.3 * sc,
-		Color(0.92, 0.88, 0.82), 0.8)
-	draw_line(head_p + f * 2.5 - perp * 0.5 * sc, head_p + f * 3.5 - perp * 0.3 * sc,
-		Color(0.92, 0.88, 0.82), 0.8)
+func _draw_rusty_sword(hand: Vector2):
+	var rust_col: Color = Color(0.55, 0.30, 0.12)
+	var tip: Vector2 = hand + Vector2(0, -12.0)
+	# Blade
+	var blade_pts := PackedVector2Array([
+		hand + Vector2(-0.9, 0),
+		hand + Vector2(0.9, 0),
+		tip + Vector2(0.4, 0),
+		tip,
+		tip + Vector2(-0.4, 0),
+	])
+	draw_colored_polygon(blade_pts, rust_col)
+	# Blade highlight
+	draw_line(hand + Vector2(0, -0.5), tip + Vector2(0, 0.5), rust_col.lightened(0.30), 0.5)
+	# Rust streaks
+	draw_line(hand + Vector2(-0.4, -3.0), hand + Vector2(-0.5, -7.5), rust_col.darkened(0.30), 0.4)
+	draw_line(hand + Vector2(0.5, -2.0), hand + Vector2(0.3, -6.0), rust_col.darkened(0.30), 0.4)
+	# Crossguard
+	draw_line(hand + Vector2(-2.0, 0.5), hand + Vector2(2.0, 0.5), Color(0.42, 0.24, 0.10), 1.0)
+	# Pommel
+	draw_circle(hand + Vector2(0, 1.4), 0.7, Color(0.42, 0.24, 0.10))
 
-func _draw_gnoll_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
-	var fur_c   := Color(0.58, 0.42, 0.22)
-	var fur_d   := Color(0.42, 0.28, 0.12)
-	var leather := Color(0.32, 0.20, 0.08)
-	# Shadow (large)
-	draw_circle(Vector2(0.3, 2.0) * sc, 6.2 * sc, Color(0.0, 0.0, 0.0, 0.22))
-	# Legs (powerful haunches)
-	var leg_l := perp * 3.0 * sc + f * (-3.8 + ls * 0.3) + Vector2(0, bob)
-	var leg_r := -perp * 3.0 * sc + f * (-3.8 - ls * 0.3) + Vector2(0, -bob)
-	draw_circle(leg_l, 2.5 * sc, fur_d)
-	draw_circle(leg_r, 2.5 * sc, fur_d)
-	draw_circle(leg_l + f * 1.5, 1.8 * sc, fur_c)
-	draw_circle(leg_r + f * 1.5, 1.8 * sc, fur_c)
-	# Massive body
-	var body := Vector2(0, bob * 0.2)
-	draw_circle(body, 5.8 * sc, fur_d)
-	draw_circle(body + f * 0.3, 5.2 * sc, fur_c)
-	# Leather harness
-	draw_arc(body, 5.0 * sc, 0, TAU, 16, leather, 1.5 * sc)
-	draw_line(body - perp * 4.5 * sc + f * 1.0, body + perp * 4.5 * sc + f * 1.0, leather, 1.2)
-	# Broad arms
-	draw_circle(body + perp * 6.2 * sc, 2.2 * sc, fur_c)
-	draw_circle(body - perp * 6.2 * sc, 2.2 * sc, fur_c)
-	draw_circle(body + perp * 6.2 * sc + f * 2.0, 1.5 * sc, fur_d)  # clawed hand
-	draw_circle(body - perp * 6.2 * sc + f * 2.0, 1.5 * sc, fur_d)
-	# Canine head with snout
-	var head_p := f * 4.5 * sc + Vector2(0, bob * 0.4)
-	draw_circle(head_p, 3.8 * sc, fur_d)
-	draw_circle(head_p + f * 0.3, 3.4 * sc, fur_c)
-	# Elongated snout
+# ─────────────────────────────────────────────────────────────────────────────
+# GOBLIN — GOBLIN SCOUT
+# Small, hunched, wiry. Oversized head. ENORMOUS pointed ears.
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _draw_goblin_svg(f: Vector2, perp2: Vector2):
+	var sc: float = 0.82
+	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var leg_swing: float = (sin(_anim_t * 11.0) * 2.0 * sc) if moving else 0.0
+	var bob: float = (sin(_anim_t * 11.0) * 0.3 * sc) if moving else 0.0
+
+	# Constant twitchy jitter
+	var jx: float = sin(_anim_t * 17.3) * 0.7 + sin(_anim_t * 7.1) * 0.3
+	var jitter: Vector2 = Vector2(jx, jx * 0.3)
+
+	var skin_col: Color = Color(0.28, 0.52, 0.18)
+	var skin_light: Color = skin_col.lightened(0.12)
+	var pants_col: Color = Color(0.20, 0.25, 0.10)
+	var leather_col: Color = Color(0.32, 0.22, 0.10)
+
+	# 1. Small ground shadow
+	var shadow_pts: PackedVector2Array = PackedVector2Array()
+	for i in range(12):
+		var a: float = float(i) / 12.0 * TAU
+		shadow_pts.append(Vector2(cos(a) * 4.5 * sc, sin(a) * 2.2 * sc) + Vector2(0.3, 1.5) * sc)
+	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.28))
+
+	# 2. Short hunched legs (wide stance)
+	_draw_goblin_leg(Vector2(-3.0 * sc, -1.0), Vector2(-3.5 * sc, 5.0 * sc + leg_swing * 0.4), pants_col, sc)
+	_draw_goblin_leg(Vector2(3.0 * sc, -1.0), Vector2(3.5 * sc, 5.0 * sc - leg_swing * 0.4), pants_col, sc)
+
+	# 3. Torso — hunched forward
+	var torso_c: Vector2 = Vector2(0, -3.5 * sc) + Vector2(0, bob)
+	_draw_goblin_torso(torso_c, f, perp2, sc, leather_col, skin_col)
+
+	# 7. Arms (wiry, long)
+	var sh_l: Vector2 = torso_c + Vector2(-3.5 * sc, -1.0 * sc)
+	var sh_r: Vector2 = torso_c + Vector2(3.5 * sc, -1.0 * sc)
+	var hand_l: Vector2 = sh_l + Vector2(-1.5 * sc, 5.0 * sc)
+	var hand_r: Vector2 = sh_r + Vector2(1.0 * sc, 5.5 * sc)
+	draw_line(sh_l, sh_l + Vector2(-1.0 * sc, 2.5 * sc), skin_col.darkened(0.10), 1.4 * sc)
+	draw_line(sh_l + Vector2(-1.0 * sc, 2.5 * sc), hand_l, skin_col, 1.2 * sc)
+	draw_line(sh_r, sh_r + Vector2(0.5 * sc, 2.8 * sc), skin_col.darkened(0.10), 1.4 * sc)
+	draw_line(sh_r + Vector2(0.5 * sc, 2.8 * sc), hand_r, skin_col, 1.2 * sc)
+	# Claw hands — 3 pointed polygon claws
+	_draw_goblin_claws(hand_l, -1.0, skin_light, sc)
+	_draw_goblin_claws(hand_r, 1.0, skin_light, sc)
+
+	# 4-6. HEAD with enormous ears
+	var head_c: Vector2 = Vector2(0, -10.5 * sc) + jitter + Vector2(0, bob * 0.6)
+	_draw_goblin_head(head_c, f, perp2, sc, skin_col, skin_light)
+
+	# 8. Crude weapon — dagger in right hand
+	_draw_goblin_dagger(hand_r, sc)
+
+	# 9. Stolen shiny at belt
+	draw_circle(torso_c + Vector2(-1.8 * sc, 3.0 * sc), 0.8 * sc, Color(0.92, 0.78, 0.20))
+	draw_circle(torso_c + Vector2(-1.8 * sc, 3.0 * sc), 0.3 * sc, Color(1.0, 0.95, 0.55))
+
+func _draw_goblin_leg(hip: Vector2, foot: Vector2, pants_col: Color, sc: float):
+	# Bent slightly outward — hunched posture
+	var w_top: float = 1.4 * sc
+	var w_bot: float = 1.1 * sc
+	var leg_pts := PackedVector2Array([
+		hip + Vector2(-w_top, 0),
+		hip + Vector2(w_top, 0),
+		foot + Vector2(w_bot, -1.0 * sc),
+		foot + Vector2(-w_bot, -1.0 * sc),
+	])
+	draw_colored_polygon(leg_pts, pants_col)
+	draw_line(leg_pts[0], leg_pts[1], pants_col.lightened(0.25), 0.5)
+	draw_line(leg_pts[1], leg_pts[2], pants_col.darkened(0.30), 0.4)
+	# Big bare foot
+	var foot_pts := PackedVector2Array([
+		foot + Vector2(-w_bot * 1.4, -1.0 * sc),
+		foot + Vector2(w_bot * 1.6, -1.0 * sc),
+		foot + Vector2(w_bot * 2.4, 0.8 * sc),
+		foot + Vector2(-w_bot * 1.6, 1.0 * sc),
+	])
+	draw_colored_polygon(foot_pts, Color(0.28, 0.52, 0.18).darkened(0.15))
+	# Toes
+	for i in range(3):
+		draw_circle(foot + Vector2(-1.0 * sc + float(i) * 1.2 * sc, 0.6 * sc), 0.35 * sc, Color(0.20, 0.40, 0.12))
+
+func _draw_goblin_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, leather_col: Color, skin_col: Color):
+	var w: float = 3.2 * sc
+	var h: float = 4.0 * sc
+	# Front
+	var fl: Vector2 = c + Vector2(-w, h * 0.5)
+	var fr: Vector2 = c + Vector2(w, h * 0.5)
+	var tr: Vector2 = c + Vector2(w * 0.7, -h * 0.5)
+	var tl: Vector2 = c + Vector2(-w * 0.7, -h * 0.5)
+	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), leather_col)
+	# Top face (lightened)
 	draw_colored_polygon(PackedVector2Array([
-		head_p + f * 2.0 + perp * 1.8 * sc,
-		head_p + f * 2.0 - perp * 1.8 * sc,
-		head_p + f * 6.0 - perp * 1.0 * sc,
-		head_p + f * 6.0 + perp * 1.0 * sc]),
-		fur_c.darkened(0.12))
+		tl, tr,
+		tr + Vector2(-0.6, -1.2 * sc),
+		tl + Vector2(0.6, -1.2 * sc),
+	]), leather_col.lightened(0.20))
+	# Shadow side
+	draw_line(fr, tr, leather_col.darkened(0.40), 1.2)
+	# Worn seams / stitches
+	draw_line(c + Vector2(-w * 0.6, -h * 0.3), c + Vector2(-w * 0.6, h * 0.4), leather_col.darkened(0.20), 0.4)
+	draw_line(c + Vector2(w * 0.5, -h * 0.3), c + Vector2(w * 0.6, h * 0.4), leather_col.darkened(0.20), 0.4)
+	# Skin patch at belly
+	draw_circle(c + Vector2(0, h * 0.3), 1.2 * sc, skin_col.darkened(0.10))
+
+func _draw_goblin_claws(hand: Vector2, side: float, skin_light: Color, sc: float):
+	# Palm
+	draw_circle(hand, 1.0 * sc, skin_light)
+	# 3 pointed claw polygons
+	for i in range(3):
+		var ang: float = (float(i) - 1.0) * 0.4 + PI * 0.5
+		var tip: Vector2 = hand + Vector2(cos(ang) * 1.8 * sc * side * 0.7, sin(ang) * 1.8 * sc)
+		var base_a: Vector2 = hand + Vector2(cos(ang + 0.3) * 0.7 * sc * side * 0.7, sin(ang + 0.3) * 0.7 * sc)
+		var base_b: Vector2 = hand + Vector2(cos(ang - 0.3) * 0.7 * sc * side * 0.7, sin(ang - 0.3) * 0.7 * sc)
+		draw_colored_polygon(PackedVector2Array([base_a, tip, base_b]), Color(0.92, 0.85, 0.65))
+		draw_line(base_a, tip, Color(0.45, 0.35, 0.20), 0.3)
+
+func _draw_goblin_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, skin_col: Color, skin_light: Color):
+	var head_r: float = 6.5 * sc
+
+	# HUGE pointed ears — drawn first so head overlaps
+	# Left ear
+	var ear_l := PackedVector2Array([
+		c + Vector2(-head_r * 0.6, -1.0),
+		c + Vector2(-head_r * 1.5, -head_r * 0.8),
+		c + Vector2(-head_r * 1.9, -head_r * 0.2),
+		c + Vector2(-head_r * 1.4, head_r * 0.5),
+		c + Vector2(-head_r * 0.7, head_r * 0.2),
+	])
+	draw_colored_polygon(ear_l, skin_col.darkened(0.10))
+	# Inner ear pink
+	var ear_l_inner := PackedVector2Array([
+		c + Vector2(-head_r * 0.7, -0.3),
+		c + Vector2(-head_r * 1.3, -head_r * 0.5),
+		c + Vector2(-head_r * 1.5, head_r * 0.1),
+		c + Vector2(-head_r * 0.8, head_r * 0.1),
+	])
+	draw_colored_polygon(ear_l_inner, Color(0.65, 0.30, 0.25))
+	# Right ear (mirror)
+	var ear_r := PackedVector2Array([
+		c + Vector2(head_r * 0.6, -1.0),
+		c + Vector2(head_r * 1.5, -head_r * 0.8),
+		c + Vector2(head_r * 1.9, -head_r * 0.2),
+		c + Vector2(head_r * 1.4, head_r * 0.5),
+		c + Vector2(head_r * 0.7, head_r * 0.2),
+	])
+	draw_colored_polygon(ear_r, skin_col.darkened(0.10))
+	var ear_r_inner := PackedVector2Array([
+		c + Vector2(head_r * 0.7, -0.3),
+		c + Vector2(head_r * 1.3, -head_r * 0.5),
+		c + Vector2(head_r * 1.5, head_r * 0.1),
+		c + Vector2(head_r * 0.8, head_r * 0.1),
+	])
+	draw_colored_polygon(ear_r_inner, Color(0.65, 0.30, 0.25))
+
+	# Head sphere
+	draw_circle(c, head_r, skin_col)
+	# Top lighter face
+	draw_circle(c + Vector2(-head_r * 0.25, -head_r * 0.3), head_r * 0.65, skin_light)
+	# Shadow side arc
+	draw_arc(c, head_r - 0.3, -PI * 0.1, PI * 0.6, 10, skin_col.darkened(0.25), 0.8)
+
+	# Eyes — LARGE
+	var eye_r: float = 1.8 * sc
+	var eye_jitter: float = 0.0
+	var eye_col: Color
+	match alert_state:
+		AlertState.UNAWARE:
+			eye_col = Color(0.85, 0.75, 0.10)
+		AlertState.SUSPICIOUS:
+			eye_col = Color(0.95, 0.50, 0.05)
+		AlertState.ALERT:
+			eye_col = Color(0.9, 0.05, 0.05)
+			eye_jitter = sin(_anim_t * 20.0) * 0.5
+		_:
+			eye_col = Color(0.85, 0.75, 0.10)
+	# Eye whites / sockets
+	draw_circle(c + Vector2(-2.0 * sc, -1.0 * sc), eye_r + 0.3, Color(0.05, 0.04, 0.04))
+	draw_circle(c + Vector2(2.0 * sc, -1.0 * sc), eye_r + 0.3, Color(0.05, 0.04, 0.04))
+	draw_circle(c + Vector2(-2.0 * sc, -1.0 * sc), eye_r + eye_jitter, eye_col)
+	draw_circle(c + Vector2(2.0 * sc, -1.0 * sc), eye_r + eye_jitter, eye_col)
+	# Slit pupils
+	draw_line(c + Vector2(-2.0 * sc, -1.5 * sc), c + Vector2(-2.0 * sc, -0.5 * sc), Color(0.05, 0.04, 0.04), 0.6)
+	draw_line(c + Vector2(2.0 * sc, -1.5 * sc), c + Vector2(2.0 * sc, -0.5 * sc), Color(0.05, 0.04, 0.04), 0.6)
+	# Eye gleam
+	draw_circle(c + Vector2(-1.6 * sc, -1.5 * sc), 0.4, Color(1.0, 1.0, 0.85))
+	draw_circle(c + Vector2(2.4 * sc, -1.5 * sc), 0.4, Color(1.0, 1.0, 0.85))
+
 	# Nose
-	draw_circle(head_p + f * 5.5, 1.0 * sc, Color(0.22, 0.12, 0.10))
-	# Eyes (amber)
-	var eye_c := Color(0.95, 0.22, 0.05) if alert_state == AlertState.ALERT else Color(0.88, 0.62, 0.12)
-	draw_circle(head_p + f * 2.5 + perp * 1.5 * sc, 0.9 * sc, Color(0.05, 0.04, 0.04))
-	draw_circle(head_p + f * 2.5 - perp * 1.5 * sc, 0.9 * sc, Color(0.05, 0.04, 0.04))
-	draw_circle(head_p + f * 2.5 + perp * 1.5 * sc, 0.55 * sc, eye_c)
-	draw_circle(head_p + f * 2.5 - perp * 1.5 * sc, 0.55 * sc, eye_c)
-	# Ears (pointed)
+	var nose := PackedVector2Array([
+		c + Vector2(0, 0.5),
+		c + Vector2(-0.8 * sc, 2.0 * sc),
+		c + Vector2(0.8 * sc, 2.0 * sc),
+	])
+	draw_colored_polygon(nose, skin_col.darkened(0.30))
+
+	# Mouth — large grin
+	draw_arc(c + Vector2(0, 3.0 * sc), 2.0 * sc, PI * 0.15, PI * 0.85, 10, Color(0.08, 0.04, 0.04), 0.9)
+	# Inner mouth
+	draw_arc(c + Vector2(0, 3.0 * sc), 1.6 * sc, PI * 0.2, PI * 0.80, 8, Color(0.25, 0.08, 0.08), 1.0)
+	# Fangs — 3 small triangle polygons
+	for i in range(3):
+		var fx: float = (float(i) - 1.0) * 1.0 * sc
+		var ftop: Vector2 = c + Vector2(fx, 3.0 * sc)
+		draw_colored_polygon(PackedVector2Array([
+			ftop + Vector2(-0.35, 0),
+			ftop + Vector2(0.35, 0),
+			ftop + Vector2(0, 1.2 * sc),
+		]), Color(0.95, 0.90, 0.78))
+
+	# Drool drop
+	var drool_y: float = 4.5 * sc + sin(_anim_t * 2.0) * 1.0
+	draw_circle(c + Vector2(1.4 * sc, drool_y), 0.55, Color(0.85, 0.92, 0.80, 0.85))
+
+func _draw_goblin_dagger(hand: Vector2, sc: float):
+	var tip: Vector2 = hand + Vector2(2.0 * sc, -5.0 * sc)
+	# Blade
 	draw_colored_polygon(PackedVector2Array([
-		head_p + perp * 3.0 * sc,
-		head_p + perp * 5.5 * sc - f * 2.5 * sc,
-		head_p + perp * 2.5 * sc - f * 1.5 * sc]),
-		fur_c)
+		hand + Vector2(-0.6, -0.4),
+		hand + Vector2(0.6, -0.4),
+		tip + Vector2(0.4, 0.4),
+		tip,
+	]), Color(0.78, 0.80, 0.85))
+	draw_line(hand + Vector2(0, -0.4), tip, Color(0.95, 0.95, 1.0), 0.4)
+	# Crossguard
+	draw_line(hand + Vector2(-1.2, 0.2), hand + Vector2(1.0, 0.2), Color(0.42, 0.30, 0.15), 0.8)
+	# Grip
+	draw_circle(hand + Vector2(-0.2, 0.8), 0.5, Color(0.30, 0.20, 0.10))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GNOLL — GNOLL BRUTE
+# Massive hyena-like humanoid. Spotted fur. Bone harness. Predatory.
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _draw_gnoll_svg(f: Vector2, perp2: Vector2):
+	var sc: float = 1.45 if is_boss else 1.22
+	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var leg_swing: float = (sin(_anim_t * 5.0) * 3.0 * sc) if moving else 0.0
+	var bob: float = (sin(_anim_t * 5.0) * 1.2 * sc) if moving else 0.0
+
+	var fur_col: Color = Color(0.55, 0.45, 0.25)
+	var fur_dark: Color = Color(0.32, 0.25, 0.12)
+	var fur_light: Color = fur_col.lightened(0.18)
+	var leather_col: Color = Color(0.30, 0.18, 0.08)
+
+	# 1. LARGE ground shadow
+	var shadow_pts: PackedVector2Array = PackedVector2Array()
+	for i in range(16):
+		var a: float = float(i) / 16.0 * TAU
+		shadow_pts.append(Vector2(cos(a) * 8.5 * sc, sin(a) * 4.0 * sc) + Vector2(0.5, 3.0) * sc)
+	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.35))
+
+	# 2. Digitigrade legs
+	_draw_gnoll_leg(Vector2(-3.5 * sc, -2.0 * sc), Vector2(-3.0 * sc, 6.0 * sc + leg_swing * 0.4 - bob * 0.5), fur_col, fur_dark, sc)
+	_draw_gnoll_leg(Vector2(3.5 * sc, -2.0 * sc), Vector2(3.5 * sc, 6.0 * sc - leg_swing * 0.4 + bob * 0.5), fur_col, fur_dark, sc)
+
+	# 3. MASSIVE torso
+	var torso_c: Vector2 = Vector2(0, -6.0 * sc) + Vector2(0, bob * 0.3)
+	_draw_gnoll_torso(torso_c, f, perp2, sc, fur_col, fur_dark, fur_light, leather_col)
+
+	# 5. Fur mane / neck ruff
+	var neck: Vector2 = torso_c + Vector2(0, -4.5 * sc)
+	_draw_gnoll_mane(neck, sc, fur_col, fur_light)
+
+	# 4. Thick arms
+	var sh_l: Vector2 = torso_c + Vector2(-5.0 * sc, -3.0 * sc)
+	var sh_r: Vector2 = torso_c + Vector2(5.0 * sc, -3.0 * sc)
+	_draw_gnoll_arm(sh_l, true, fur_col, fur_dark, sc)
+	_draw_gnoll_arm(sh_r, false, fur_col, fur_dark, sc)
+	var hand_r: Vector2 = sh_r + Vector2(2.5 * sc, 6.0 * sc)
+
+	# 6-8. Head with snout
+	var head_c: Vector2 = neck + Vector2(0, -3.0 * sc)
+	_draw_gnoll_head(head_c, f, perp2, sc, fur_col, fur_dark, fur_light)
+
+	# 10. Heavy weapon — great axe
+	_draw_gnoll_axe(hand_r, sc)
+
+	# 11. Ground impact when walking
+	if moving:
+		var feet: Vector2 = Vector2(0, 6.5 * sc)
+		var pulse_r: float = (1.5 + abs(sin(_anim_t * 5.0)) * 2.0) * sc
+		draw_arc(feet, pulse_r, 0, TAU, 14, Color(0.2, 0.15, 0.08, 0.10), 1.0)
+
+func _draw_gnoll_leg(hip: Vector2, paw: Vector2, fur_col: Color, fur_dark: Color, sc: float):
+	# Digitigrade: knee forward, ankle bent backward
+	var knee: Vector2 = Vector2(hip.x + (paw.x - hip.x) * 0.3, hip.y + (paw.y - hip.y) * 0.4) + Vector2(sign(hip.x) * 1.5 * sc, 0)
+	var ankle: Vector2 = Vector2(hip.x + (paw.x - hip.x) * 0.7, hip.y + (paw.y - hip.y) * 0.75) + Vector2(-sign(hip.x) * 0.5 * sc, 0)
+	# Thick thigh
+	var thigh_pts := PackedVector2Array([
+		hip + Vector2(-2.2 * sc, 0),
+		hip + Vector2(2.2 * sc, 0),
+		knee + Vector2(1.4 * sc, 0),
+		knee + Vector2(-1.4 * sc, 0),
+	])
+	draw_colored_polygon(thigh_pts, fur_col)
+	draw_line(thigh_pts[0], thigh_pts[1], fur_light, 0.6)
+	draw_line(thigh_pts[1], thigh_pts[2], fur_dark.darkened(0.20), 0.5)
+	# Shin (thinner)
+	var shin_pts := PackedVector2Array([
+		knee + Vector2(-1.3 * sc, 0),
+		knee + Vector2(1.3 * sc, 0),
+		ankle + Vector2(0.9 * sc, 0),
+		ankle + Vector2(-0.9 * sc, 0),
+	])
+	draw_colored_polygon(shin_pts, fur_col.darkened(0.10))
+	# Foot/paw — wide with 3 toe nubs
+	var paw_pts := PackedVector2Array([
+		ankle + Vector2(-1.5 * sc, 0),
+		ankle + Vector2(1.8 * sc, 0),
+		paw + Vector2(2.5 * sc, 0.4 * sc),
+		paw + Vector2(-1.8 * sc, 0.6 * sc),
+	])
+	draw_colored_polygon(paw_pts, fur_dark)
+	# Toe nubs
+	for i in range(3):
+		draw_circle(paw + Vector2(-0.8 * sc + float(i) * 1.3 * sc, 0.3 * sc), 0.55 * sc, fur_dark.darkened(0.15))
+		# Claw
+		var cl: Vector2 = paw + Vector2(-0.8 * sc + float(i) * 1.3 * sc, 1.1 * sc)
+		draw_colored_polygon(PackedVector2Array([
+			cl + Vector2(-0.3, -0.3),
+			cl + Vector2(0.3, -0.3),
+			cl + Vector2(0, 0.6),
+		]), Color(0.18, 0.10, 0.06))
+
+func _draw_gnoll_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, fur_col: Color, fur_dark: Color, fur_light: Color, leather: Color):
+	var w: float = 6.0 * sc
+	var h: float = 7.0 * sc
+	# Wide front face
+	var fl: Vector2 = c + Vector2(-w, h * 0.5)
+	var fr: Vector2 = c + Vector2(w, h * 0.5)
+	var tr: Vector2 = c + Vector2(w * 0.85, -h * 0.5)
+	var tl: Vector2 = c + Vector2(-w * 0.85, -h * 0.5)
+	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), fur_col)
+	# Top face
 	draw_colored_polygon(PackedVector2Array([
-		head_p - perp * 3.0 * sc,
-		head_p - perp * 5.5 * sc - f * 2.5 * sc,
-		head_p - perp * 2.5 * sc - f * 1.5 * sc]),
-		fur_c)
+		tl, tr,
+		tr + Vector2(-1.0 * sc, -2.0 * sc),
+		tl + Vector2(1.0 * sc, -2.0 * sc),
+	]), fur_light)
+	# Shadow side
+	draw_line(fr, tr, fur_dark.darkened(0.20), 1.8)
+	# Fur patches (lighter irregular polygons)
+	for i in range(4):
+		var px: float = -w * 0.6 + float(i) * w * 0.4
+		var py: float = -h * 0.2 + sin(float(i) * 1.7) * h * 0.2
+		draw_colored_polygon(PackedVector2Array([
+			c + Vector2(px - 1.2, py - 0.5),
+			c + Vector2(px + 1.0, py - 0.8),
+			c + Vector2(px + 1.3, py + 0.9),
+			c + Vector2(px - 0.8, py + 0.7),
+		]), fur_light)
+	# Dark spots (signature gnoll look)
+	for i in range(7):
+		var sx: float = -w * 0.7 + float((i * 37) % 100) / 100.0 * w * 1.4
+		var sy: float = -h * 0.4 + float((i * 53) % 100) / 100.0 * h * 0.8
+		var sr: float = 0.6 + float((i * 17) % 30) / 30.0 * 0.5
+		draw_colored_polygon(PackedVector2Array([
+			c + Vector2(sx - sr, sy),
+			c + Vector2(sx, sy - sr),
+			c + Vector2(sx + sr, sy),
+			c + Vector2(sx, sy + sr),
+		]), fur_dark)
+	# Leather harness — two diagonal straps crossing chest
+	draw_line(c + Vector2(-w * 0.85, -h * 0.4), c + Vector2(w * 0.5, h * 0.3), leather, 1.5)
+	draw_line(c + Vector2(w * 0.85, -h * 0.4), c + Vector2(-w * 0.5, h * 0.3), leather, 1.5)
+	# Bone trophy at harness center
+	var bone_c: Vector2 = c + Vector2(0, 0)
+	draw_circle(bone_c, 1.2 * sc, Color(0.92, 0.88, 0.78))
+	draw_line(bone_c + Vector2(-1.0 * sc, 0), bone_c + Vector2(1.0 * sc, 0), Color(0.92, 0.88, 0.78), 1.8)
+	draw_circle(bone_c + Vector2(-1.0 * sc, 0), 0.4 * sc, Color(0.92, 0.88, 0.78))
+	draw_circle(bone_c + Vector2(1.0 * sc, 0), 0.4 * sc, Color(0.92, 0.88, 0.78))
+
+func _draw_gnoll_mane(neck: Vector2, sc: float, fur_col: Color, fur_light: Color):
+	# Irregular polygon ruff
+	var pts := PackedVector2Array()
+	var n: int = 12
+	for i in range(n):
+		var a: float = float(i) / float(n) * TAU
+		var r: float = 4.5 * sc + sin(float(i) * 2.3) * 1.2 * sc
+		# Spikier at top, flatter at bottom
+		if sin(a) < 0:
+			r *= 1.2
+		pts.append(neck + Vector2(cos(a) * r * 1.3, sin(a) * r * 0.7))
+	draw_colored_polygon(pts, fur_light)
+	# Inner darker
+	var inner := PackedVector2Array()
+	for i in range(n):
+		var a: float = float(i) / float(n) * TAU
+		inner.append(neck + Vector2(cos(a) * 3.0 * sc, sin(a) * 1.8 * sc))
+	draw_colored_polygon(inner, fur_col)
+
+func _draw_gnoll_arm(shoulder: Vector2, is_left: bool, fur_col: Color, fur_dark: Color, sc: float):
+	var side: float = -1.0 if is_left else 1.0
+	var elbow: Vector2 = shoulder + Vector2(side * 1.5 * sc, 3.5 * sc)
+	var wrist: Vector2 = shoulder + Vector2(side * 2.5 * sc, 6.0 * sc)
+	# Upper arm — very wide
+	var ua_pts := PackedVector2Array([
+		shoulder + Vector2(-2.0 * sc, 0),
+		shoulder + Vector2(2.0 * sc, 0),
+		elbow + Vector2(1.4 * sc, 0),
+		elbow + Vector2(-1.4 * sc, 0),
+	])
+	draw_colored_polygon(ua_pts, fur_col)
+	draw_line(ua_pts[0], ua_pts[1], fur_col.lightened(0.20), 0.5)
+	# Forearm
+	var fa_pts := PackedVector2Array([
+		elbow + Vector2(-1.3 * sc, 0),
+		elbow + Vector2(1.3 * sc, 0),
+		wrist + Vector2(1.0 * sc, 0),
+		wrist + Vector2(-1.0 * sc, 0),
+	])
+	draw_colored_polygon(fa_pts, fur_dark)
+	# Spot
+	draw_circle(elbow + Vector2(0, 1.0), 0.7 * sc, fur_dark.darkened(0.20))
+	# 3 large hooked claws
+	for i in range(3):
+		var ang: float = -0.5 + float(i) * 0.4
+		var tip: Vector2 = wrist + Vector2(side * cos(ang) * 2.2 * sc, sin(ang) * 2.2 * sc + 1.5 * sc)
+		var base_a: Vector2 = wrist + Vector2(side * cos(ang + 0.2) * 0.8 * sc, sin(ang + 0.2) * 0.8 * sc + 0.6 * sc)
+		var base_b: Vector2 = wrist + Vector2(side * cos(ang - 0.2) * 0.8 * sc, sin(ang - 0.2) * 0.8 * sc + 0.6 * sc)
+		draw_colored_polygon(PackedVector2Array([base_a, tip, base_b]), Color(0.18, 0.10, 0.06))
+		draw_line(base_a, tip, Color(0.10, 0.06, 0.04), 0.3)
+
+func _draw_gnoll_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, fur_col: Color, fur_dark: Color, fur_light: Color):
+	# Elongated head shape — not a round circle
+	var head_pts := PackedVector2Array([
+		c + Vector2(-3.0 * sc, -2.5 * sc),
+		c + Vector2(3.0 * sc, -2.5 * sc),
+		c + Vector2(3.5 * sc, 0),
+		c + Vector2(3.0 * sc, 2.0 * sc),
+		c + Vector2(-3.0 * sc, 2.0 * sc),
+		c + Vector2(-3.5 * sc, 0),
+	])
+	draw_colored_polygon(head_pts, fur_col)
+	# Top lighter
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-3.0 * sc, -2.5 * sc),
+		c + Vector2(3.0 * sc, -2.5 * sc),
+		c + Vector2(2.5 * sc, -0.5 * sc),
+		c + Vector2(-2.5 * sc, -0.5 * sc),
+	]), fur_light)
+	# Shadow side
+	draw_line(c + Vector2(3.5 * sc, 0), c + Vector2(3.0 * sc, 2.0 * sc), fur_dark, 1.0)
+
+	# Ears — large pointed, upright
+	var ear_l := PackedVector2Array([
+		c + Vector2(-2.5 * sc, -2.5 * sc),
+		c + Vector2(-3.5 * sc, -5.5 * sc),
+		c + Vector2(-1.5 * sc, -3.5 * sc),
+	])
+	draw_colored_polygon(ear_l, fur_col)
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-2.3 * sc, -2.8 * sc),
+		c + Vector2(-3.0 * sc, -4.8 * sc),
+		c + Vector2(-1.8 * sc, -3.5 * sc),
+	]), fur_light)
+	var ear_r := PackedVector2Array([
+		c + Vector2(2.5 * sc, -2.5 * sc),
+		c + Vector2(3.5 * sc, -5.5 * sc),
+		c + Vector2(1.5 * sc, -3.5 * sc),
+	])
+	draw_colored_polygon(ear_r, fur_col)
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(2.3 * sc, -2.8 * sc),
+		c + Vector2(3.0 * sc, -4.8 * sc),
+		c + Vector2(1.8 * sc, -3.5 * sc),
+	]), fur_light.darkened(0.10))
+
+	# Snout — forward-projecting
+	var snout_pts := PackedVector2Array([
+		c + Vector2(-1.8 * sc, 0.5 * sc),
+		c + Vector2(1.8 * sc, 0.5 * sc),
+		c + Vector2(1.5 * sc, 4.5 * sc),
+		c + Vector2(-1.5 * sc, 4.5 * sc),
+	])
+	draw_colored_polygon(snout_pts, fur_col.darkened(0.10))
+	draw_line(snout_pts[0], snout_pts[1], fur_light, 0.5)
+	draw_line(snout_pts[1], snout_pts[2], fur_dark, 0.5)
+
+	# Wet nose
+	draw_circle(c + Vector2(0, 4.2 * sc), 0.9 * sc, Color(0.10, 0.06, 0.08))
+	draw_circle(c + Vector2(-0.3 * sc, 4.0 * sc), 0.3, Color(0.55, 0.50, 0.45))
+
+	# Mouth with fangs
+	draw_line(c + Vector2(-1.4 * sc, 3.0 * sc), c + Vector2(1.4 * sc, 3.0 * sc), Color(0.10, 0.06, 0.06), 0.7)
+	# Upper fangs
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(-1.0 * sc, 3.0 * sc),
+		c + Vector2(-0.5 * sc, 3.0 * sc),
+		c + Vector2(-0.75 * sc, 4.2 * sc),
+	]), Color(0.96, 0.92, 0.78))
+	draw_colored_polygon(PackedVector2Array([
+		c + Vector2(0.5 * sc, 3.0 * sc),
+		c + Vector2(1.0 * sc, 3.0 * sc),
+		c + Vector2(0.75 * sc, 4.2 * sc),
+	]), Color(0.96, 0.92, 0.78))
+
+	# Predatory eyes
+	var eye_l_p: Vector2 = c + Vector2(-1.6 * sc, -0.5 * sc)
+	var eye_r_p: Vector2 = c + Vector2(1.6 * sc, -0.5 * sc)
+	var amber: Color = Color(0.85, 0.62, 0.10)
+	var slit_w: float = 0.5
+	match alert_state:
+		AlertState.SUSPICIOUS:
+			amber = Color(0.95, 0.55, 0.05)
+		AlertState.ALERT:
+			amber = Color(1.0, 0.30, 0.05)
+			slit_w = 1.1
+			# Aura around eyes
+			draw_arc(eye_l_p, 2.0 * sc, 0, TAU, 12,
+				Color(1.0, 0.30, 0.10, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.0)
+			draw_arc(eye_r_p, 2.0 * sc, 0, TAU, 12,
+				Color(1.0, 0.30, 0.10, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.0)
+	# Eye whites
+	draw_circle(eye_l_p, 1.1 * sc, Color(0.95, 0.85, 0.55))
+	draw_circle(eye_r_p, 1.1 * sc, Color(0.95, 0.85, 0.55))
+	draw_circle(eye_l_p, 0.9 * sc, amber)
+	draw_circle(eye_r_p, 0.9 * sc, amber)
+	# Slit pupil — thin or wide based on state
+	draw_line(eye_l_p + Vector2(0, -0.8 * sc), eye_l_p + Vector2(0, 0.8 * sc), Color(0.05, 0.03, 0.03), slit_w)
+	draw_line(eye_r_p + Vector2(0, -0.8 * sc), eye_r_p + Vector2(0, 0.8 * sc), Color(0.05, 0.03, 0.03), slit_w)
+
+func _draw_gnoll_axe(hand: Vector2, sc: float):
+	var shaft_top: Vector2 = hand + Vector2(0, -10.0 * sc)
+	var shaft_bot: Vector2 = hand + Vector2(0, 4.0 * sc)
+	# Wood shaft
+	draw_line(shaft_bot, shaft_top, Color(0.32, 0.20, 0.10), 1.6)
+	draw_line(shaft_bot + Vector2(0.5, 0), shaft_top + Vector2(0.5, 0), Color(0.45, 0.30, 0.15), 0.6)
+	# Iron axe head — crescent
+	var head_c: Vector2 = shaft_top + Vector2(0, -0.5 * sc)
+	var axe_pts := PackedVector2Array([
+		head_c + Vector2(-3.5 * sc, -1.0 * sc),
+		head_c + Vector2(-3.0 * sc, -3.5 * sc),
+		head_c + Vector2(-0.5 * sc, -2.5 * sc),
+		head_c + Vector2(0.5 * sc, -2.5 * sc),
+		head_c + Vector2(2.5 * sc, -1.5 * sc),
+		head_c + Vector2(2.0 * sc, 1.5 * sc),
+		head_c + Vector2(-0.5 * sc, 1.0 * sc),
+		head_c + Vector2(-3.0 * sc, 2.5 * sc),
+		head_c + Vector2(-3.5 * sc, 0.5 * sc),
+	])
+	draw_colored_polygon(axe_pts, Color(0.42, 0.40, 0.45))
+	# Highlight edge
+	draw_line(axe_pts[0], axe_pts[1], Color(0.75, 0.73, 0.78), 0.7)
+	draw_line(axe_pts[1], axe_pts[2], Color(0.75, 0.73, 0.78), 0.5)
+	# Shadow
+	draw_line(axe_pts[4], axe_pts[5], Color(0.20, 0.18, 0.22), 0.7)
+	# Scratches / nicks
+	draw_line(head_c + Vector2(-2.0 * sc, -0.5 * sc), head_c + Vector2(-0.5 * sc, 0.5 * sc), Color(0.20, 0.18, 0.22), 0.3)
+	draw_line(head_c + Vector2(-1.5 * sc, -1.8 * sc), head_c + Vector2(-1.0 * sc, -0.8 * sc), Color(0.20, 0.18, 0.22), 0.3)
+	# Back spike
+	draw_colored_polygon(PackedVector2Array([
+		head_c + Vector2(2.0 * sc, -0.5 * sc),
+		head_c + Vector2(4.0 * sc, 0),
+		head_c + Vector2(2.0 * sc, 0.5 * sc),
+	]), Color(0.38, 0.36, 0.40))
+	# Binding rope at shaft
+	draw_line(shaft_top + Vector2(-1.0, 1.5), shaft_top + Vector2(1.0, 1.5), Color(0.20, 0.14, 0.08), 0.6)
+	draw_line(shaft_top + Vector2(-1.0, 2.3), shaft_top + Vector2(1.0, 2.3), Color(0.20, 0.14, 0.08), 0.6)
 
 func _is_blocked(target_pos: Vector2) -> bool:
 	var space = get_world_2d().direct_space_state
