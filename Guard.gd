@@ -1698,8 +1698,8 @@ func _draw_gnoll_svg(f: Vector2, perp2: Vector2):
 	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.35))
 
 	# 2. Digitigrade legs
-	_draw_gnoll_leg(Vector2(-3.5 * sc, -2.0 * sc), Vector2(-3.0 * sc, 6.0 * sc + leg_swing * 0.4 - bob * 0.5), fur_col, fur_dark, sc)
-	_draw_gnoll_leg(Vector2(3.5 * sc, -2.0 * sc), Vector2(3.5 * sc, 6.0 * sc - leg_swing * 0.4 + bob * 0.5), fur_col, fur_dark, sc)
+	_draw_gnoll_leg(Vector2(-3.5 * sc, -2.0 * sc), Vector2(-3.0 * sc, 6.0 * sc + leg_swing * 0.4 - bob * 0.5), fur_col, fur_dark, fur_light, sc)
+	_draw_gnoll_leg(Vector2(3.5 * sc, -2.0 * sc), Vector2(3.5 * sc, 6.0 * sc - leg_swing * 0.4 + bob * 0.5), fur_col, fur_dark, fur_light, sc)
 
 	# 3. MASSIVE torso
 	var torso_c: Vector2 = Vector2(0, -6.0 * sc) + Vector2(0, bob * 0.3)
@@ -1729,7 +1729,7 @@ func _draw_gnoll_svg(f: Vector2, perp2: Vector2):
 		var pulse_r: float = (1.5 + abs(sin(_anim_t * 5.0)) * 2.0) * sc
 		draw_arc(feet, pulse_r, 0, TAU, 14, Color(0.2, 0.15, 0.08, 0.10), 1.0)
 
-func _draw_gnoll_leg(hip: Vector2, paw: Vector2, fur_col: Color, fur_dark: Color, sc: float):
+func _draw_gnoll_leg(hip: Vector2, paw: Vector2, fur_col: Color, fur_dark: Color, fur_light: Color, sc: float):
 	# Digitigrade: knee forward, ankle bent backward
 	var knee: Vector2 = Vector2(hip.x + (paw.x - hip.x) * 0.3, hip.y + (paw.y - hip.y) * 0.4) + Vector2(sign(hip.x) * 1.5 * sc, 0)
 	var ankle: Vector2 = Vector2(hip.x + (paw.x - hip.x) * 0.7, hip.y + (paw.y - hip.y) * 0.75) + Vector2(-sign(hip.x) * 0.5 * sc, 0)
