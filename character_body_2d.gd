@@ -2316,7 +2316,7 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 			draw_circle(body_pos - perp * 4.5 + f * 0.3, 1.2, paul_c.lightened(0.12))
 
 	# ── Hood / head ───────────────────────────────────────────────────────────
-	var head_pos := vis + f * 3.6 + Vector2(0, bob * 0.45)
+	head_pos = vis + f * 3.6 + Vector2(0, bob * 0.45)
 	var hood_dark := cloak_col.darkened(0.2)
 	draw_circle(head_pos, 3.2, hood_dark)
 	# Hood fold lines
