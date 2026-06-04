@@ -5,6 +5,9 @@ extends Node2D
 
 const DETECT_RANGE   = 36.0
 const FADE_DURATION  = 180.0
+const INTERACT_RANGE = 28.0
+
+const _dice_scene = preload("res://DicePopup.tscn")
 
 # SET_IRON bonus: extra discovery window (+6s reaction time before guards notice)
 var _set_iron_grace := 0.0
@@ -12,9 +15,11 @@ var _set_iron_grace := 0.0
 var body_facing  := Vector2.RIGHT
 var _discovered  := false
 var _age         := 0.0
+var _loot_pulse  := 0.0
 
 func _ready():
 	add_to_group("bodies")
+	add_to_group("interactable")
 	if has_meta("body_facing"):
 		body_facing = get_meta("body_facing")
 	if get_meta("no_body", false):
@@ -22,6 +27,38 @@ func _ready():
 		return
 	if GameManager.has_gear_effect("SET_IRON"):
 		_set_iron_grace = 6.0
+
+func is_in_range(player_pos: Vector2) -> bool:
+	return global_position.distance_to(player_pos) <= INTERACT_RANGE
+
+func interact(player: Node2D):
+	if get_meta("being_carried", false):
+		return
+	if get_meta("body_looted", false):
+		return
+	var loot: Array = get_meta("body_loot", [])
+	if loot.is_empty():
+		return
+	set_meta("body_looted", true)
+	var pop_offset := 0.0
+	for entry in loot:
+		var item_id: String = entry.get("id", "GOLD_PIECE")
+		var val: int = entry.get("value", 0)
+		var col: Color = entry.get("color", Color(0.95, 0.80, 0.10))
+		var label: String
+		if item_id == "GOLD_PIECE":
+			label = "+%d gp" % val
+		else:
+			label = "%s (+%dgp)" % [entry.get("name", item_id), val]
+		GameManager.add_gold(val)
+		var popup = _dice_scene.instantiate()
+		popup.setup(label, col)
+		popup.global_position = global_position + Vector2(0, -18 - pop_offset)
+		get_tree().root.add_child(popup)
+		pop_offset += 14.0
+	if player.has_method("emit_noise"):
+		player.emit_noise(player.NoiseLevel.SILENT)
+	queue_redraw()
 
 func _process(delta):
 	_age += delta
@@ -65,3 +102,11 @@ func _draw():
 	# "Discovered" glow when a guard has already noticed it
 	if _discovered:
 		draw_arc(Vector2.ZERO, 8.5, 0, TAU, 16, Color(1.0, 0.55, 0.05, 0.30), 1.0)
+
+	# Loot indicator — gold coin glint above body if not yet looted
+	var has_loot: bool = has_meta("body_loot") and not get_meta("body_looted", false)
+	if has_loot:
+		var pulse := sin(_age * 3.5) * 0.5 + 0.5
+		draw_circle(Vector2(0, -10), 2.5, Color(0.95, 0.80, 0.15, 0.65 + pulse * 0.25))
+		draw_arc(Vector2(0, -10), 3.5, 0, TAU, 10,
+			Color(0.92, 0.75, 0.18, 0.40 + pulse * 0.25), 1.0)

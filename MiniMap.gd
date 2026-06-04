@@ -107,7 +107,7 @@ func _draw():
 
 		# Room label (small, only if visited)
 		if vis and r.size.x >= 18:
-			var lbl := ROOM_NAMES[i]
+			var lbl: String = ROOM_NAMES[i]
 			var font_size := 6 if r.size.x < 28 else 7
 			draw_string(font, r.position + Vector2(2, r.size.y - 2), lbl,
 				HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 2, font_size,

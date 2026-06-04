@@ -72,17 +72,11 @@ var _tex_altar:  Texture2D = null
 
 func _ready():
 	add_to_group("levelmap")
-	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	_tileset    = load("res://sprites/tileset.png")     as Texture2D
-	_tex_booth  = load("res://sprites/furn_booth.png")  as Texture2D
-	_tex_crate  = load("res://sprites/furn_crate.png")  as Texture2D
-	_tex_board  = load("res://sprites/furn_noticeboard.png") as Texture2D
-	_tex_bed    = load("res://sprites/furn_bed.png")    as Texture2D
-	_tex_table  = load("res://sprites/furn_table.png")  as Texture2D
-	_tex_bench  = load("res://sprites/furn_bench.png")  as Texture2D
-	_tex_rack   = load("res://sprites/furn_rack.png")   as Texture2D
-	_tex_plinth = load("res://sprites/furn_plinth.png") as Texture2D
-	_tex_altar  = load("res://sprites/furn_altar.png")  as Texture2D
+	# V7: all art is procedural SVG-style — no textures needed
+	_tileset    = null
+	_tex_booth  = null; _tex_crate = null; _tex_board = null
+	_tex_bed    = null; _tex_table = null; _tex_bench = null
+	_tex_rack   = null; _tex_plinth = null; _tex_altar = null
 	_apply_floor_theme()
 	_build_map()
 	_randomize_cover()
@@ -431,10 +425,8 @@ func _draw_zone_labels(font: Font):
 	draw_string(font, Vector2(320, 100), "— THE VAULT —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
 	draw_string(font, Vector2(256,  20), loot_name,                HORIZONTAL_ALIGNMENT_LEFT, -1, sz, loot_col)
 
-# ── Room furniture ────────────────────────────────────────────────────────────
+# ── Room furniture (full SVG procedural art) ──────────────────────────────────
 func _draw_room_furniture():
-	if not _tex_booth:
-		return
 	_draw_entry_furniture()
 	_draw_barracks_furniture()
 	_draw_storeroom_furniture()
@@ -442,100 +434,216 @@ func _draw_room_furniture():
 	_draw_vault_furniture()
 	_draw_armory_furniture()
 
-func _tex(tex: Texture2D, dest: Rect2):
-	draw_texture_rect(tex, dest, false)
+func _svg_bed(x: float, y: float, w: float, h: float):
+	var frame  := Color(0.28, 0.20, 0.10)
+	var mattress := Color(0.52, 0.40, 0.28)
+	var pillow := Color(0.82, 0.76, 0.65)
+	var sheet  := Color(0.62, 0.52, 0.38)
+	draw_rect(Rect2(x, y, w, h), frame)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 2), mattress)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h * 0.55), sheet)
+	draw_rect(Rect2(x + 2, y + 2, (w - 4) * 0.55, h * 0.28), pillow)
+	# Pillow seam
+	draw_line(Vector2(x + 2 + (w - 4) * 0.275, y + 2), Vector2(x + 2 + (w - 4) * 0.275, y + 2 + h * 0.28),
+		Color(pillow.r * 0.80, pillow.g * 0.80, pillow.b * 0.80, 0.60), 0.7)
+
+func _svg_crate(x: float, y: float, w: float, h: float):
+	var wood  := Color(0.42, 0.28, 0.14)
+	var plank := Color(0.55, 0.38, 0.20)
+	var band  := Color(0.30, 0.22, 0.10)
+	draw_rect(Rect2(x, y, w, h), wood)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 2), plank)
+	# Plank lines
+	draw_line(Vector2(x + 1, y + h * 0.33), Vector2(x + w - 1, y + h * 0.33), band, 0.7)
+	draw_line(Vector2(x + 1, y + h * 0.66), Vector2(x + w - 1, y + h * 0.66), band, 0.7)
+	# Metal bands
+	draw_rect(Rect2(x, y, w, 2), band)
+	draw_rect(Rect2(x, y + h - 2, w, 2), band)
+
+func _svg_table(x: float, y: float, w: float, h: float):
+	var leg   := Color(0.32, 0.22, 0.10)
+	var top   := Color(0.50, 0.36, 0.18)
+	var edge  := Color(0.38, 0.26, 0.12)
+	draw_rect(Rect2(x, y, w, h), leg)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 3), top)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, 1), Color(top.r * 1.3, top.g * 1.3, top.b * 1.2, 0.60))
+
+func _svg_bench(x: float, y: float, w: float, h: float):
+	var wood := Color(0.38, 0.26, 0.12)
+	var seat := Color(0.50, 0.36, 0.18)
+	draw_rect(Rect2(x, y, w, h), wood)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 2), seat)
+
+func _svg_rack(x: float, y: float, w: float, h: float):
+	var frame := Color(0.30, 0.20, 0.08)
+	var bar   := Color(0.48, 0.35, 0.18)
+	draw_rect(Rect2(x, y, w, h), frame)
+	# Horizontal pegs at intervals
+	var peg_y := y + 6.0
+	while peg_y < y + h - 4:
+		draw_rect(Rect2(x - 3, peg_y, w + 6, 2), bar)
+		# Weapon silhouettes on pegs
+		draw_line(Vector2(x - 4, peg_y + 1), Vector2(x - 12, peg_y - 4), Color(0.60, 0.58, 0.65), 0.8)
+		peg_y += 10.0
+
+func _svg_plinth(x: float, y: float, w: float, h: float):
+	var stone := Color(0.38, 0.32, 0.28)
+	var top   := Color(0.50, 0.42, 0.36)
+	var base  := Color(0.28, 0.22, 0.18)
+	draw_rect(Rect2(x, y + 2, w, h - 2), stone)
+	draw_rect(Rect2(x + 1, y + 2, w - 2, h - 4), top)
+	draw_rect(Rect2(x - 1, y + h - 3, w + 2, 3), base)
+	draw_rect(Rect2(x - 1, y, w + 2, 3), base)
+
+func _svg_booth(x: float, y: float, w: float, h: float):
+	var wood   := Color(0.32, 0.24, 0.12)
+	var face   := Color(0.42, 0.32, 0.16)
+	var ledge  := Color(0.50, 0.38, 0.20)
+	draw_rect(Rect2(x, y, w, h), wood)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 2), face)
+	# Counter ledge
+	draw_rect(Rect2(x - 1, y + h * 0.35, w + 2, 3), ledge)
+	draw_rect(Rect2(x - 1, y + h * 0.35, w + 2, 1), Color(ledge.r * 1.3, ledge.g * 1.3, ledge.b * 1.2, 0.55))
+
+func _svg_noticeboard(x: float, y: float, w: float, h: float):
+	var frame   := Color(0.32, 0.22, 0.10)
+	var cork    := Color(0.60, 0.45, 0.28)
+	var note1   := Color(0.88, 0.82, 0.65)
+	var note2   := Color(0.75, 0.72, 0.55)
+	draw_rect(Rect2(x, y, w, h), frame)
+	draw_rect(Rect2(x + 1, y + 1, w - 2, h - 2), cork)
+	draw_rect(Rect2(x + 2, y + 2, 7, 5), note1)
+	draw_rect(Rect2(x + 11, y + 3, 8, 4), note2)
+	draw_rect(Rect2(x + 3, y + 9, 12, 3), note1)
 
 func _draw_entry_furniture():
-	# Guard booths flanking the north entrances
-	_tex(_tex_booth, Rect2(280, 472, 20, 24))
-	_tex(_tex_booth, Rect2(444, 472, 20, 24))
+	# Guard booths
+	_svg_booth(280, 472, 20, 24)
+	_svg_booth(444, 472, 20, 24)
 	# Notice boards on south wall
-	for nx in [252.0, 472.0]:
-		_tex(_tex_board, Rect2(nx, 544, 22, 16))
+	for nx: float in [252.0, 472.0]:
+		_svg_noticeboard(nx, 544, 22, 16)
 
 func _draw_barracks_furniture():
-	# Beds along north wall (5 bunks)
+	# Beds along north wall
 	for bx: float in [32, 80, 128, 176, 240]:
-		_tex(_tex_bed, Rect2(bx, 316, 24, 22))
+		_svg_bed(bx, 316, 24, 22)
 	# Communal table
 	var tx := 40.0
 	while tx < 280.0:
 		var tw := minf(32.0, 280.0 - tx)
-		_tex(_tex_table, Rect2(tx, 388, tw, 16))
+		_svg_table(tx, 388, tw, 16)
 		tx += 32.0
 	# Benches above and below table
-	for bench_y in [376.0, 406.0]:
+	for bench_y: float in [376.0, 406.0]:
 		var bx2 := 48.0
 		while bx2 < 272.0:
-			var bw := minf(32.0, 272.0 - bx2)
-			_tex(_tex_bench, Rect2(bx2, bench_y, bw, 8))
+			_svg_bench(bx2, bench_y, minf(32.0, 272.0 - bx2), 8)
 			bx2 += 32.0
 	# Weapon rack in NW corner
-	_tex(_tex_rack, Rect2(20, 340, 12, 48))
+	_svg_rack(20, 340, 12, 48)
 
 func _draw_storeroom_furniture():
 	# Crate stacks in rows
 	for cx: float in [480, 544, 608, 672]:
-		_tex(_tex_crate, Rect2(cx, 340, 24, 24))
+		_svg_crate(cx, 340, 24, 24)
 	for cx: float in [496, 560, 624]:
-		_tex(_tex_crate, Rect2(cx, 406, 24, 24))
+		_svg_crate(cx, 406, 24, 24)
+	# Additional scattered crates
+	_svg_crate(466, 374, 18, 18)
+	_svg_crate(658, 380, 18, 18)
 
 func _draw_captain_furniture():
-	# Captain's desk with chair
-	_tex(_tex_table, Rect2(80, 200, 32, 16))
-	_tex(_tex_bench, Rect2(88, 218, 16, 8))
-	# Evidence plinth
-	_tex(_tex_plinth, Rect2(28, 158, 18, 14))
-	# Rune carvings on north wall — office has been here a long time
-	var rune := Color(0.50, 0.38, 0.28, 0.40)
-	for i in range(3):
-		var rx := 32.0 + i * 48.0
-		draw_circle(Vector2(rx, 136), 2.0, rune)
-		draw_line(Vector2(rx - 3, 136), Vector2(rx + 3, 136), rune, 0.7)
-		draw_line(Vector2(rx, 133), Vector2(rx, 139), rune, 0.7)
+	# Captain's ornate desk
+	_svg_table(72, 196, 40, 18)
+	_svg_bench(80, 216, 20, 8)
+	# Evidence plinth with glow
+	_svg_plinth(28, 156, 18, 16)
+	var plinth_glow := Color(0.55, 0.40, 0.25, 0.22 + abs(sin(_t * 0.9)) * 0.10)
+	draw_circle(Vector2(37, 158), 8.0, plinth_glow)
+	# Rune carvings on north wall
+	var rune := Color(0.50, 0.38, 0.28, 0.42)
+	for i in range(4):
+		var rx := 30.0 + i * 40.0
+		draw_circle(Vector2(rx, 136), 2.2, rune)
+		draw_line(Vector2(rx - 3.5, 136), Vector2(rx + 3.5, 136), rune, 0.7)
+		draw_line(Vector2(rx, 132.5), Vector2(rx, 139.5), rune, 0.7)
+		draw_arc(Vector2(rx, 136), 2.2, 0, TAU, 8, Color(rune.r, rune.g, rune.b, 0.25), 0.5)
+	# Bookcase along east wall
+	var bc_col := Color(0.28, 0.18, 0.08)
+	draw_rect(Rect2(226, 132, 16, 64), bc_col)
+	for by2 in range(4):
+		var row_y2 := 136.0 + by2 * 14.0
+		draw_rect(Rect2(227, row_y2, 14, 10), Color(0.18, 0.28, 0.45))
+		draw_rect(Rect2(228, row_y2 + 1, 12, 8), Color(0.22, 0.32, 0.50))
+		# Book spines
+		for bi in range(4):
+			var bk_cols := [Color(0.72, 0.22, 0.18), Color(0.22, 0.55, 0.28), Color(0.45, 0.35, 0.65), Color(0.75, 0.65, 0.18)]
+			draw_rect(Rect2(228 + bi * 3, row_y2 + 1, 2, 8), bk_cols[bi])
 
 func _draw_vault_furniture():
-	# Animated glow aura at vault centre
-	var glow := Color(0.65, 0.45, 0.85, 0.18 + abs(sin(_t * 1.2)) * 0.08)
-	draw_circle(Vector2(384, 56), 28.0, glow)
+	# Animated arcane glow at vault centre
+	var pulse: float = abs(sin(_t * 1.5))
+	var glow  := Color(0.58, 0.35, 0.88, 0.16 + pulse * 0.10)
+	draw_circle(Vector2(384, 56), 32.0, glow)
+	draw_circle(Vector2(384, 56), 18.0, Color(0.70, 0.50, 1.00, 0.08 + pulse * 0.06))
 	# Grand plinth
-	_tex(_tex_plinth, Rect2(375, 64, 18, 14))
-	# Floor inlay diamond
-	var inlay := Color(C_FLOOR_VAULT_A.r + 0.05, C_FLOOR_VAULT_A.g + 0.03, C_FLOOR_VAULT_A.b + 0.08, 0.70)
+	_svg_plinth(374, 62, 20, 16)
+	# Glowing artifact on plinth
+	var art_col := Color(0.80, 0.60, 1.00, 0.72 + pulse * 0.20)
+	draw_circle(Vector2(384, 64), 3.5, art_col)
+	draw_arc(Vector2(384, 64), 5.0, 0, TAU, 14, Color(art_col.r, art_col.g, art_col.b, 0.45), 1.0)
+	# Floor inlay diamond mosaic
+	var inlay := Color(C_FLOOR_VAULT_A.r + 0.08, C_FLOOR_VAULT_A.g + 0.04, C_FLOOR_VAULT_A.b + 0.12, 0.75)
 	var pts := PackedVector2Array([
-		Vector2(384, 28), Vector2(440, 56),
-		Vector2(384, 84), Vector2(328, 56),
+		Vector2(384, 22), Vector2(448, 56),
+		Vector2(384, 90), Vector2(320, 56),
 	])
-	draw_colored_polygon(pts, Color(inlay.r, inlay.g, inlay.b, 0.12))
-	draw_polyline(pts + PackedVector2Array([pts[0]]), Color(inlay.r, inlay.g, inlay.b, 0.30), 0.8)
+	draw_colored_polygon(pts, Color(inlay.r, inlay.g, inlay.b, 0.10))
+	draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]),
+		Color(inlay.r, inlay.g, inlay.b, 0.28), 0.8)
+	# Inner diamond
+	var inner := [Vector2(384, 38), Vector2(416, 56), Vector2(384, 74), Vector2(352, 56)]
+	draw_polyline(PackedVector2Array(inner + [inner[0]]),
+		Color(inlay.r * 1.5, inlay.g * 1.5, inlay.b * 2.0, 0.40 + pulse * 0.10), 0.7)
 	# Side altar to the east
-	var altar_glow := Color(0.85, 0.70, 0.30, 0.12 + abs(sin(_t * 0.8)) * 0.06)
-	draw_circle(Vector2(572, 56), 20.0, altar_glow)
-	_tex(_tex_altar, Rect2(555, 44, 36, 24))
-	# Wall bracket sconces
-	var bracket := Color(0.40, 0.30, 0.50)
-	for sx in [166.0, 586.0]:
-		draw_rect(Rect2(sx, 20, 10, 6), bracket)
-		draw_line(Vector2(sx + 5, 20), Vector2(sx + 5, 26), bracket, 1.5)
+	var altar_pulse := Color(0.88, 0.72, 0.28, 0.14 + abs(sin(_t * 0.85)) * 0.08)
+	draw_circle(Vector2(572, 56), 22.0, altar_pulse)
+	_svg_plinth(558, 44, 28, 22)
+	draw_circle(Vector2(572, 46), 5.5, Color(0.95, 0.82, 0.35, 0.65 + abs(sin(_t * 2.2)) * 0.22))
+	# Wall bracket sconces (decorative)
+	var bracket := Color(0.42, 0.30, 0.50)
+	for sx: float in [162.0, 590.0]:
+		draw_rect(Rect2(sx, 18, 12, 8), bracket)
+		draw_rect(Rect2(sx + 2, 16, 8, 4), Color(bracket.r * 1.3, bracket.g * 1.2, bracket.b * 1.4))
+		draw_line(Vector2(sx + 6, 18), Vector2(sx + 6, 24), bracket, 1.5)
 	# Cobwebs in vault corners
-	var web := Color(0.45, 0.42, 0.50, 0.30)
-	_draw_cobweb(Vector2(130, 18),  Vector2( 1,  1), web)
-	_draw_cobweb(Vector2(638, 18),  Vector2(-1,  1), web)
-	# Gold treasure pile clusters
-	var gold  := Color(0.85, 0.68, 0.15)
-	var gold2 := Color(0.70, 0.52, 0.10)
-	for corner in [Vector2(168, 28), Vector2(600, 28)]:
-		for ci in range(5):
-			var cr := 1.8 + (ci % 3) * 1.0
-			var co := Vector2(float(ci % 3) * 5 - 5, float(ci / 3) * 4)
-			draw_circle(corner + co, cr, gold if ci % 2 == 0 else gold2)
+	var web := Color(0.48, 0.44, 0.52, 0.32)
+	_draw_cobweb(Vector2(132, 18), Vector2(1, 1), web)
+	_draw_cobweb(Vector2(636, 18), Vector2(-1, 1), web)
+	# Gold treasure pile clusters near altar and vault edge
+	var gold_a := Color(0.88, 0.70, 0.15)
+	var gold_b := Color(0.72, 0.54, 0.10)
+	for corner in [Vector2(166, 28), Vector2(598, 28), Vector2(228, 78), Vector2(540, 78)]:
+		for ci in range(6):
+			var cr := 1.6 + (ci % 3) * 0.9
+			var co := Vector2(float(ci % 3) * 5 - 5, float(ci / 3) * 4 - 2)
+			draw_circle(corner + co, cr, gold_a if ci % 2 == 0 else gold_b)
+			if ci == 0:
+				draw_circle(corner + co - Vector2(0.5, 0.5), cr * 0.4, Color(1.0, 0.96, 0.80, 0.55))
 
 func _draw_armory_furniture():
 	# Weapon racks along east wall
-	_tex(_tex_rack, Rect2(636, 148, 12, 48))
-	_tex(_tex_rack, Rect2(636, 220, 12, 48))
+	_svg_rack(636, 148, 12, 52)
+	_svg_rack(636, 216, 12, 52)
 	# Storage crate
-	_tex(_tex_crate, Rect2(648, 200, 24, 20))
+	_svg_crate(646, 196, 28, 22)
+	# Armor stand (simple silhouette)
+	var as_x := 644.0; var as_y := 150.0
+	draw_circle(Vector2(as_x + 8, as_y + 8), 5.0, Color(0.45, 0.42, 0.48))  # helm
+	draw_rect(Rect2(as_x + 3, as_y + 13, 10, 14), Color(0.40, 0.38, 0.42))  # torso
+	draw_line(Vector2(as_x + 3, as_y + 16), Vector2(as_x - 3, as_y + 24), Color(0.40, 0.38, 0.42), 2.0)  # arm L
+	draw_line(Vector2(as_x + 13, as_y + 16), Vector2(as_x + 19, as_y + 24), Color(0.40, 0.38, 0.42), 2.0)  # arm R
 
 func _draw_cobweb(origin: Vector2, dir: Vector2, col: Color):
 	for i in range(4):

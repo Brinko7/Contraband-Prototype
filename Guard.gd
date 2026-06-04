@@ -106,14 +106,8 @@ func _ready():
 	elif enemy_type == EnemyType.HUMAN and randi_range(1, 10) <= 4:
 		dropped_weapon = "SHIV"
 	# Goblin and Skeleton drop nothing
-	_sprite = Sprite2D.new()
-	_sprite.texture = _ENEMY_SHEET
-	_sprite.hframes = 8
-	_sprite.vframes = 6
-	_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	_sprite.offset = Vector2(0, -10)
-	_sprite.scale = Vector2(1.0, 1.0)
-	add_child(_sprite)
+	# V7: pure SVG procedural art — no sprite sheet
+	_sprite = null
 
 func _apply_modifier():
 	match GameManager.run_modifier:
@@ -235,7 +229,6 @@ func _process(delta):
 		if _footprints.size() > 4:
 			_footprints.pop_front()
 	_update_de_escalation(delta)
-	_update_sprite()
 	queue_redraw()
 
 func _get_move_interval() -> float:
@@ -740,11 +733,34 @@ func _spawn_body():
 	var body := Node2D.new()
 	body.set_script(_body_script)
 	body.set_meta("body_facing", facing)
+	# Roll loot, pre-compute display data so BodyMarker needs no LootSystem reference
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var raw_loot: Array[Dictionary] = LootSystem.roll_body_loot(is_captain, is_boss, GameManager.current_floor, rng)
+	var display_loot: Array[Dictionary] = []
+	for entry in raw_loot:
+		var item_id: String = entry.get("id", "GOLD_PIECE")
+		var cnt: int = entry.get("count", 1)
+		if item_id == "GOLD_PIECE":
+			display_loot.append({"id": "GOLD_PIECE", "count": cnt, "name": "Gold", "value": cnt, "color": Color(0.95, 0.80, 0.10)})
+		else:
+			var idata: Dictionary = LootSystem.get_item(item_id)
+			var ival: int = LootSystem.get_item_value(item_id, GameManager.current_floor)
+			var icol: Color = LootSystem.get_rarity_color(item_id)
+			display_loot.append({"id": item_id, "count": cnt, "name": idata.get("name", item_id), "value": ival, "color": icol})
+	body.set_meta("body_loot", display_loot)
+	body.set_meta("body_looted", false)
 	var scene := get_tree().current_scene
 	scene.add_child(body)
 	body.global_position = global_position
 
 func _draw():
+	var f    := facing.normalized()
+	var perp2 := f.rotated(PI * 0.5)
+
+	# ── SVG Guard body ────────────────────────────────────────────────────────
+	_draw_guard_svg(f, perp2)
+
 	var half_angle    := deg_to_rad(vision_angle / 2.0)
 	var facing_angle  := facing.angle()
 	var perp          := facing.rotated(PI * 0.5).normalized()
@@ -762,7 +778,7 @@ func _draw():
 			var drawn: float = 0.0
 			while drawn < total_len:
 				var seg_start := from + seg_dir * drawn
-				var seg_end   := from + seg_dir * min(drawn + 4.0, total_len)
+				var seg_end: Vector2 = from + seg_dir * min(drawn + 4.0, total_len)
 				draw_line(seg_start, seg_end, col, 1.0)
 				drawn += 8.0
 		# Waypoint dots
@@ -825,8 +841,7 @@ func _draw():
 	if _is_stunned:
 		draw_arc(Vector2.ZERO, 9.0, 0, TAU, 20, Color(0.90, 0.70, 0.15, 0.55 + abs(sin(_anim_t*6))*0.2), 2.5)
 
-	# ── Body shadow — at feet (y=0 is feet level with sprite offset -10) ──────
-	draw_circle(Vector2(0.5, 0.0), 5.0, Color(0.0, 0.0, 0.0, 0.28))
+	# (body shadow is part of SVG drawing above)
 
 	# ── Alert indicator — diamond glyph ────────────────────────────────────────
 	if alert_state == AlertState.SUSPICIOUS:
@@ -890,28 +905,242 @@ func _draw():
 		draw_arc(Vector2.ZERO, 9.5, 0, TAU, 24, Color(0.95, 0.78, 0.15, 0.22), 1.0)
 
 
-func _update_sprite():
-	if _sprite == null:
-		return
-	# Row: HUMAN=0, SKELETON=1, GOBLIN=2, GNOLL=3, BOSS=4
-	var row := 4 if is_boss else int(enemy_type)
-	# Col: DOWN=0-1, LEFT=2-3, RIGHT=4-5, UP=6-7
-	var col_base: int
-	if facing == Vector2.DOWN:    col_base = 0
-	elif facing == Vector2.LEFT:  col_base = 2
-	elif facing == Vector2.RIGHT: col_base = 4
-	else:                         col_base = 6
-	var walk_frame := int(_anim_t * 4.0) % 2
-	_sprite.frame = row * 8 + col_base + walk_frame
-	# Skeleton: subtle bone pulse when unaware, red-tint when alert
-	if enemy_type == EnemyType.SKELETON:
-		var pulse: float = abs(sin(_anim_t * 2.5)) * 0.08
-		if alert_state == AlertState.ALERT:
-			_sprite.modulate = Color(1.0, 0.6 + pulse, 0.6 + pulse)
-		else:
-			_sprite.modulate = Color(1.0 + pulse, 1.0 + pulse, 1.0 + pulse)
-	elif _sprite.modulate != Color.WHITE:
-		_sprite.modulate = Color.WHITE
+func _draw_guard_svg(f: Vector2, perp: Vector2):
+	var t := _anim_t
+	# Alert state colors
+	var alert_tint := Color.WHITE
+	if alert_state == AlertState.SUSPICIOUS:
+		alert_tint = Color(1.0, 0.88, 0.60)
+	elif alert_state == AlertState.ALERT:
+		alert_tint = Color(1.0, 0.75, 0.72)
+	var hurt_flash := _hurt_flash_t > 0.0
+	if hurt_flash:
+		alert_tint = Color(1.0, 0.38, 0.38)
+
+	var moving := move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var leg_swing := sin(t * 11.0) * 2.0 if moving else 0.0
+	var bob       := sin(t * 11.0) * 0.45 if moving else 0.0
+	var scale     := 1.35 if is_boss else (1.18 if is_captain else 1.0)
+
+	match enemy_type:
+		EnemyType.HUMAN:
+			_draw_human_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+		EnemyType.SKELETON:
+			_draw_skeleton_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+		EnemyType.GOBLIN:
+			_draw_goblin_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+		EnemyType.GNOLL:
+			_draw_gnoll_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+		_:
+			_draw_human_svg(f, perp, t, leg_swing, bob, scale, alert_tint)
+
+func _draw_human_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
+	var a := tint.a
+	# Shadow
+	draw_circle(Vector2(0.3, 1.5) * sc, 5.0 * sc, Color(0.0, 0.0, 0.0, 0.20))
+	# Cape/tabard
+	var cape_l := -f * 0.8 + perp * 4.0 * sc
+	var cape_r := -f * 0.8 - perp * 4.0 * sc
+	var cape_tip := -f * 9.5 * sc + Vector2(0, bob * 0.2)
+	var tabard_col := Color(0.25, 0.30, 0.48)  # faction dark blue
+	if alert_state == AlertState.ALERT: tabard_col = Color(0.48, 0.25, 0.25)
+	draw_colored_polygon(PackedVector2Array([cape_l, cape_r, cape_tip]),
+		Color(tabard_col.r * 0.55, tabard_col.g * 0.55, tabard_col.b * 0.60, 0.85))
+	# Legs
+	var leg_l := perp * 2.5 * sc + f * (-3.5 + ls * 0.3) + Vector2(0, bob)
+	var leg_r := -perp * 2.5 * sc + f * (-3.5 - ls * 0.3) + Vector2(0, -bob)
+	var boot_c := Color(0.22, 0.18, 0.12)
+	draw_circle(leg_l + f * 1.2, 1.5 * sc, boot_c)
+	draw_circle(leg_r + f * 1.2, 1.5 * sc, boot_c)
+	draw_circle(leg_l, 1.8 * sc, boot_c.darkened(0.2))
+	draw_circle(leg_r, 1.8 * sc, boot_c.darkened(0.2))
+	# Body — chainmail + tabard
+	var body := Vector2(0, bob * 0.2) * sc
+	draw_circle(body, 4.8 * sc, Color(0.40, 0.38, 0.42))  # chainmail
+	draw_colored_polygon(PackedVector2Array([
+		body + f * 1.5 + perp * 2.5 * sc,
+		body + f * 1.5 - perp * 2.5 * sc,
+		body - f * 2.5 - perp * 2.2 * sc,
+		body - f * 2.5 + perp * 2.2 * sc]),
+		tabard_col)  # tabard overlay
+	# Chainmail highlight
+	draw_circle(body - f * 1.0 + perp * 1.0, 1.4 * sc, Color(0.65, 0.63, 0.68, 0.35))
+	# Arms
+	draw_circle(body + perp * 5.2 * sc, 1.5 * sc, Color(0.40, 0.38, 0.42))
+	draw_circle(body - perp * 5.2 * sc, 1.5 * sc, Color(0.40, 0.38, 0.42))
+	# Spear/weapon in leading hand
+	var spear_base := body + perp * 5.5 * sc + f * 0.5
+	draw_line(spear_base, spear_base + f * 9.0 * sc, Color(0.50, 0.38, 0.20), 1.2)
+	draw_line(spear_base + f * 9.0 * sc, spear_base + f * 9.0 * sc + f * 2.5 * sc,
+		Color(0.72, 0.70, 0.75), 1.6)  # spearhead
+	# Helmet
+	var head_p := f * 3.8 * sc + Vector2(0, bob * 0.4)
+	draw_circle(head_p, 3.2 * sc, Color(0.48, 0.44, 0.50))  # helmet base
+	draw_arc(head_p, 3.2 * sc, f.angle() - PI * 0.85, f.angle() + PI * 0.85, 12,
+		Color(0.58, 0.54, 0.62), 1.8 * sc)  # helmet rim
+	# Visor slit
+	draw_line(head_p + f * 2.0 - perp * 1.5 * sc,
+		head_p + f * 2.0 + perp * 1.5 * sc,
+		Color(0.12, 0.10, 0.12, 0.80), 0.8)
+	# Alert eye-glow through visor
+	if alert_state == AlertState.ALERT:
+		draw_line(head_p + f * 2.0 - perp * 1.2 * sc,
+			head_p + f * 2.0 + perp * 1.2 * sc,
+			Color(1.0, 0.28, 0.08, 0.80), 0.7)
+	# Helmet plume (Captain/Boss distinction)
+	if is_captain or is_boss:
+		var plume_col := Color(0.85, 0.65, 0.10) if is_boss else Color(0.82, 0.18, 0.18)
+		for i in range(3):
+			var pp := head_p + f * -0.5 - perp * (1.0 - i * 1.0) * sc
+			draw_line(pp, pp - f * 4.0 * sc + Vector2(0, -1.0 + sin(t * 6.0 + i) * 0.5),
+				plume_col, 1.2)
+
+func _draw_skeleton_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
+	var bone_w := Color(0.88, 0.85, 0.78)
+	var bone_d := Color(0.62, 0.58, 0.52)
+	var eye_c  := Color(0.90, 0.15, 0.05) if alert_state == AlertState.ALERT else Color(0.22, 0.22, 0.32)
+	# Shadow
+	draw_circle(Vector2(0.3, 1.5) * sc, 4.5 * sc, Color(0.0, 0.0, 0.0, 0.18))
+	# Legs (bones)
+	var leg_l := perp * 2.2 * sc + f * (-3.2 + ls * 0.3) + Vector2(0, bob)
+	var leg_r := -perp * 2.2 * sc + f * (-3.2 - ls * 0.3) + Vector2(0, -bob)
+	draw_line(leg_l - f * 2.0, leg_l + f * 1.5, bone_d, 1.4)
+	draw_line(leg_r - f * 2.0, leg_r + f * 1.5, bone_d, 1.4)
+	draw_circle(leg_l + f * 1.5, 1.2 * sc, bone_w)
+	draw_circle(leg_r + f * 1.5, 1.2 * sc, bone_w)
+	# Ribcage
+	var body := Vector2(0, bob * 0.18)
+	draw_circle(body, 4.5 * sc, bone_d)
+	# Rib lines
+	for i in range(3):
+		var rib_y := body + Vector2(0, (-1.2 + i * 1.3) * sc)
+		draw_line(rib_y - perp * 3.5 * sc, rib_y + perp * 3.5 * sc, bone_w, 0.9)
+	# Spine
+	draw_line(body + f * 2.0, body - f * 4.0, bone_d, 1.0)
+	# Arms (bone rods)
+	var arm_l := body + perp * 5.0 * sc
+	var arm_r := body - perp * 5.0 * sc
+	draw_line(arm_l - f * 1.5, arm_l + f * 2.0, bone_w, 1.2)
+	draw_line(arm_r - f * 1.5, arm_r + f * 2.0, bone_w, 1.2)
+	draw_circle(arm_l + f * 2.0, 1.0 * sc, bone_w)
+	draw_circle(arm_r + f * 2.0, 1.0 * sc, bone_w)
+	# Skull
+	var skull := f * 4.0 * sc + Vector2(0, bob * 0.35)
+	draw_circle(skull, 3.4 * sc, bone_d)
+	draw_circle(skull + f * 0.5, 3.0 * sc, bone_w)
+	# Eye sockets
+	var eye_l := skull + f * 1.8 + perp * 1.3 * sc
+	var eye_r := skull + f * 1.8 - perp * 1.3 * sc
+	draw_circle(eye_l, 1.0 * sc, Color(0.08, 0.06, 0.08))
+	draw_circle(eye_r, 1.0 * sc, Color(0.08, 0.06, 0.08))
+	draw_circle(eye_l, 0.55 * sc, eye_c)
+	draw_circle(eye_r, 0.55 * sc, eye_c)
+	# Jaw
+	draw_arc(skull + f * 1.5, 2.0 * sc, f.angle() - 0.7, f.angle() + 0.7, 8, bone_d, 1.0)
+	draw_line(skull + f * 1.5 + perp * 1.0 * sc, skull + f * 3.0 + perp * 0.8 * sc, bone_w, 0.7)
+	draw_line(skull + f * 1.5 - perp * 1.0 * sc, skull + f * 3.0 - perp * 0.8 * sc, bone_w, 0.7)
+
+func _draw_goblin_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
+	var skin_g := Color(0.28, 0.52, 0.22)
+	var leather := Color(0.35, 0.22, 0.10)
+	# Shadow (small and hunched)
+	draw_circle(Vector2(0.3, 1.0) * sc, 4.0 * sc, Color(0.0, 0.0, 0.0, 0.18))
+	# Legs
+	var leg_l := perp * 2.0 * sc + f * (-2.8 + ls * 0.4) + Vector2(0, bob)
+	var leg_r := -perp * 2.0 * sc + f * (-2.8 - ls * 0.4) + Vector2(0, -bob)
+	draw_circle(leg_l + f * 1.0, 1.4 * sc, skin_g.darkened(0.2))
+	draw_circle(leg_r + f * 1.0, 1.4 * sc, skin_g.darkened(0.2))
+	# Hunched body
+	var body := f * 0.6 + Vector2(0, bob * 0.2)
+	draw_circle(body, 4.2 * sc, leather.darkened(0.15))
+	draw_circle(body + f * 0.5, 3.5 * sc, skin_g)
+	draw_circle(body + f * 0.8 - f * 2.2, 2.0 * sc, skin_g.lightened(0.08))  # belly hump
+	# Arms (long and dangling)
+	draw_line(body + perp * 4.2 * sc - f * 1.0, body + perp * 3.5 * sc + f * 4.0, skin_g, 1.3)
+	draw_line(body - perp * 4.2 * sc - f * 1.0, body - perp * 3.5 * sc + f * 4.0, skin_g, 1.3)
+	draw_circle(body + perp * 3.5 * sc + f * 4.0, 1.2 * sc, skin_g.lightened(0.08))  # claws
+	draw_circle(body - perp * 3.5 * sc + f * 4.0, 1.2 * sc, skin_g.lightened(0.08))
+	# Big-eared head
+	var head_p := f * 3.5 * sc + Vector2(0, bob * 0.3)
+	draw_circle(head_p, 3.0 * sc, skin_g)
+	# Big pointy ears
+	draw_colored_polygon(PackedVector2Array([
+		head_p + perp * 2.5 * sc,
+		head_p + perp * 6.5 * sc + f * -1.0 * sc,
+		head_p + perp * 2.8 * sc - f * 1.5 * sc]),
+		skin_g.darkened(0.12))
+	draw_colored_polygon(PackedVector2Array([
+		head_p - perp * 2.5 * sc,
+		head_p - perp * 6.5 * sc + f * -1.0 * sc,
+		head_p - perp * 2.8 * sc - f * 1.5 * sc]),
+		skin_g.darkened(0.12))
+	# Beady eyes
+	draw_circle(head_p + f * 2.0 + perp * 1.0 * sc, 0.8 * sc, Color(0.08, 0.05, 0.05))
+	draw_circle(head_p + f * 2.0 - perp * 1.0 * sc, 0.8 * sc, Color(0.08, 0.05, 0.05))
+	var eye_c := Color(0.95, 0.22, 0.05) if alert_state == AlertState.ALERT else Color(0.85, 0.72, 0.18)
+	draw_circle(head_p + f * 2.0 + perp * 1.0 * sc, 0.45 * sc, eye_c)
+	draw_circle(head_p + f * 2.0 - perp * 1.0 * sc, 0.45 * sc, eye_c)
+	# Fangs
+	draw_line(head_p + f * 2.5 + perp * 0.5 * sc, head_p + f * 3.5 + perp * 0.3 * sc,
+		Color(0.92, 0.88, 0.82), 0.8)
+	draw_line(head_p + f * 2.5 - perp * 0.5 * sc, head_p + f * 3.5 - perp * 0.3 * sc,
+		Color(0.92, 0.88, 0.82), 0.8)
+
+func _draw_gnoll_svg(f: Vector2, perp: Vector2, t: float, ls: float, bob: float, sc: float, tint: Color):
+	var fur_c   := Color(0.58, 0.42, 0.22)
+	var fur_d   := Color(0.42, 0.28, 0.12)
+	var leather := Color(0.32, 0.20, 0.08)
+	# Shadow (large)
+	draw_circle(Vector2(0.3, 2.0) * sc, 6.2 * sc, Color(0.0, 0.0, 0.0, 0.22))
+	# Legs (powerful haunches)
+	var leg_l := perp * 3.0 * sc + f * (-3.8 + ls * 0.3) + Vector2(0, bob)
+	var leg_r := -perp * 3.0 * sc + f * (-3.8 - ls * 0.3) + Vector2(0, -bob)
+	draw_circle(leg_l, 2.5 * sc, fur_d)
+	draw_circle(leg_r, 2.5 * sc, fur_d)
+	draw_circle(leg_l + f * 1.5, 1.8 * sc, fur_c)
+	draw_circle(leg_r + f * 1.5, 1.8 * sc, fur_c)
+	# Massive body
+	var body := Vector2(0, bob * 0.2)
+	draw_circle(body, 5.8 * sc, fur_d)
+	draw_circle(body + f * 0.3, 5.2 * sc, fur_c)
+	# Leather harness
+	draw_arc(body, 5.0 * sc, 0, TAU, 16, leather, 1.5 * sc)
+	draw_line(body - perp * 4.5 * sc + f * 1.0, body + perp * 4.5 * sc + f * 1.0, leather, 1.2)
+	# Broad arms
+	draw_circle(body + perp * 6.2 * sc, 2.2 * sc, fur_c)
+	draw_circle(body - perp * 6.2 * sc, 2.2 * sc, fur_c)
+	draw_circle(body + perp * 6.2 * sc + f * 2.0, 1.5 * sc, fur_d)  # clawed hand
+	draw_circle(body - perp * 6.2 * sc + f * 2.0, 1.5 * sc, fur_d)
+	# Canine head with snout
+	var head_p := f * 4.5 * sc + Vector2(0, bob * 0.4)
+	draw_circle(head_p, 3.8 * sc, fur_d)
+	draw_circle(head_p + f * 0.3, 3.4 * sc, fur_c)
+	# Elongated snout
+	draw_colored_polygon(PackedVector2Array([
+		head_p + f * 2.0 + perp * 1.8 * sc,
+		head_p + f * 2.0 - perp * 1.8 * sc,
+		head_p + f * 6.0 - perp * 1.0 * sc,
+		head_p + f * 6.0 + perp * 1.0 * sc]),
+		fur_c.darkened(0.12))
+	# Nose
+	draw_circle(head_p + f * 5.5, 1.0 * sc, Color(0.22, 0.12, 0.10))
+	# Eyes (amber)
+	var eye_c := Color(0.95, 0.22, 0.05) if alert_state == AlertState.ALERT else Color(0.88, 0.62, 0.12)
+	draw_circle(head_p + f * 2.5 + perp * 1.5 * sc, 0.9 * sc, Color(0.05, 0.04, 0.04))
+	draw_circle(head_p + f * 2.5 - perp * 1.5 * sc, 0.9 * sc, Color(0.05, 0.04, 0.04))
+	draw_circle(head_p + f * 2.5 + perp * 1.5 * sc, 0.55 * sc, eye_c)
+	draw_circle(head_p + f * 2.5 - perp * 1.5 * sc, 0.55 * sc, eye_c)
+	# Ears (pointed)
+	draw_colored_polygon(PackedVector2Array([
+		head_p + perp * 3.0 * sc,
+		head_p + perp * 5.5 * sc - f * 2.5 * sc,
+		head_p + perp * 2.5 * sc - f * 1.5 * sc]),
+		fur_c)
+	draw_colored_polygon(PackedVector2Array([
+		head_p - perp * 3.0 * sc,
+		head_p - perp * 5.5 * sc - f * 2.5 * sc,
+		head_p - perp * 2.5 * sc - f * 1.5 * sc]),
+		fur_c)
 
 func _is_blocked(target_pos: Vector2) -> bool:
 	var space = get_world_2d().direct_space_state

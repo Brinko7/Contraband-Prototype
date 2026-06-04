@@ -93,7 +93,7 @@ var _battle_shout_active := false  # SELLSWORD: next melee hit deals double dama
 # Movement slide — sprite visually slides from old tile to new while position snaps
 var _slide_from:   Vector2 = Vector2.ZERO   # sprite-local offset at slide start
 var _slide_t:      float   = 0.0            # 0→1 progress; 0 = idle
-const _SLIDE_DUR:  float   = 0.08           # seconds to complete one tile slide
+const _SLIDE_DUR:  float   = 0.14           # seconds to complete one tile slide
 
 # Attack lunge + hitstop
 var _lunge_t:      float   = 0.0            # 0→1 progress; drives sprite offset forward then back
@@ -147,6 +147,7 @@ const _DIR_COL    := { "DOWN": 0, "LEFT": 2, "RIGHT": 4, "UP": 6 }
 
 var _sprite: Sprite2D = null
 var _walk_frame    := 0
+var _anim_t        := 0.0   # continuously advancing timer for smooth SVG animation
 
 func _ready():
 	_init_items()
@@ -171,19 +172,8 @@ func _setup_camera():
 		cam.position_smoothing_speed   = 8.0
 
 func _setup_sprite():
-	var tex := load(_SPRITE_SHEET) as Texture2D
-	if tex == null:
-		return
-	_sprite = Sprite2D.new()
-	_sprite.texture   = tex
-	_sprite.hframes   = _SPRITE_HFRAMES
-	_sprite.vframes   = _SPRITE_VFRAMES
-	_sprite.offset    = Vector2(0, -4)   # shift sprite up so feet align with physics body
-	_sprite.centered       = true
-	_sprite.z_index        = 0
-	_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	add_child(_sprite)
-	_update_sprite_frame()
+	# V7: pure SVG procedural art — no sprite sheet needed
+	_sprite = null
 
 func _get_facing_dir() -> String:
 	var f := facing.normalized()
@@ -347,6 +337,7 @@ func equip_gear(slot: String, gear_id: String):
 	gear[slot] = gear_id
 
 func _process(delta):
+	_anim_t += delta
 	is_sneaking = Input.is_key_pressed(KEY_SHIFT) or Input.is_action_pressed("game_sneak")
 	if not is_sneaking:
 		for joypad in Input.get_connected_joypads():
@@ -568,12 +559,17 @@ func _try_interact():
 					return
 		_drop_body()
 		return
-	# Check for nearby bodies to pick up first
+	# Check for nearby bodies — loot first, then pick up
 	for body in get_tree().get_nodes_in_group("bodies"):
 		if not is_instance_valid(body):
 			continue
 		if global_position.distance_to(body.global_position) <= 28.0:
 			if not body.get_meta("being_carried", false):
+				# Loot body if it has unlooted items
+				if body.has_meta("body_loot") and not body.get_meta("body_looted", false):
+					if body.has_method("interact"):
+						body.interact(self)
+					return
 				_pickup_body(body)
 				return
 	# Normal interactables — try the closest one first so doors/loot beat curtains/traps
@@ -1815,8 +1811,16 @@ func _draw():
 	var f    := facing.normalized()
 	var perp := f.rotated(PI * 0.5)
 	var cls  := GameManager.selected_class
+	var race := GameManager.selected_race
 
-	# Patrol route overlay — Assassin timed reveal OR SHADOWGLASS permanent
+	# Slide/lunge visual offset — body moves with sprite-like fluidity
+	var vis: Vector2 = Vector2.ZERO
+	if _slide_t > 0.0:
+		vis = _slide_from * (_slide_t * _slide_t)
+	elif _lunge_t > 0.0:
+		vis = facing * _LUNGE_PX * sin(_lunge_t * PI)
+
+	# ── Patrol route overlay ──────────────────────────────────────────────────
 	var show_patrol := _patrol_reveal_timer > 0.0 or has_gear("PATROL_SIGHT")
 	if show_patrol:
 		var alpha: float = 0.22 if has_gear("PATROL_SIGHT") \
@@ -1833,60 +1837,16 @@ func _draw():
 				draw_line(a, b, trail_col, 1.0)
 				draw_circle(a, 2.5, trail_col)
 
+	# ── Character body ─────────────────────────────────────────────────────────
 	if is_hidden:
-		draw_arc(Vector2.ZERO, 5.0, 0, TAU, 16, Color(0.55, 0.30, 0.95, 0.30), 1.0)
-		# Weapon and overlay effects still drawn below; skip body only
-	elif _sprite == null:
-		# Fallback procedural body when sprite sheet isn't loaded
-		var cloak_col: Color
-		var cape_col:  Color
-		var hood_col:  Color
-		var rim_col:   Color
-		match cls:
-			"CUTPURSE":
-				cloak_col = Color(0.28, 0.20, 0.08) if not is_sneaking else Color(0.15, 0.10, 0.04)
-				cape_col  = Color(0.20, 0.14, 0.05) if not is_sneaking else Color(0.10, 0.07, 0.02)
-				hood_col  = Color(0.22, 0.15, 0.06) if not is_sneaking else Color(0.11, 0.08, 0.03)
-				rim_col   = Color(0.60, 0.48, 0.18)
-			"ASSASSIN":
-				cloak_col = Color(0.24, 0.06, 0.06) if not is_sneaking else Color(0.14, 0.03, 0.03)
-				cape_col  = Color(0.18, 0.04, 0.04) if not is_sneaking else Color(0.09, 0.02, 0.02)
-				hood_col  = Color(0.15, 0.04, 0.04) if not is_sneaking else Color(0.08, 0.02, 0.02)
-				rim_col   = Color(0.75, 0.20, 0.20)
-			_:
-				cloak_col = Color(0.20, 0.16, 0.38) if not is_sneaking else Color(0.10, 0.08, 0.20)
-				cape_col  = Color(0.12, 0.09, 0.26) if not is_sneaking else Color(0.06, 0.04, 0.14)
-				hood_col  = Color(0.12, 0.09, 0.26) if not is_sneaking else Color(0.07, 0.05, 0.15)
-				rim_col   = Color(0.32, 0.26, 0.52)
-		var race_data: Dictionary = GameManager.RACES.get(GameManager.selected_race, {})
-		var skin_col: Color = race_data.get("skin", Color(0.82, 0.68, 0.52))
-		var hood_pos := f * 1.8 + Vector2(0, -1.0)
-		var face_pos := f * 4.2 + Vector2(0, -0.5)
-		draw_colored_polygon(PackedVector2Array([-f * 0.0 + perp * 5.0, -f * 0.0 - perp * 5.0, -f * 10.0 + Vector2(0,1)]), cape_col)
-		draw_circle(Vector2(0.5, 1.0), 5.5, Color(0.0, 0.0, 0.0, 0.30))
-		draw_circle(Vector2.ZERO, 5.5, cloak_col)
-		draw_circle(hood_pos, 4.0, hood_col)
-		draw_arc(hood_pos, 4.0, f.angle() - 1.2, f.angle() + 1.2, 10, Color(rim_col.r, rim_col.g, rim_col.b, 0.7), 1.0)
-		draw_circle(face_pos, 1.4, skin_col)
-		match GameManager.selected_race:
-			"TIEFLING":
-				draw_line(hood_pos + perp * 3.0 + f * -0.5, hood_pos + perp * 3.0 + f * -0.5 + perp * 2.0 + f * -3.5, Color(0.15, 0.05, 0.25), 1.5)
-				draw_line(hood_pos - perp * 3.0 + f * -0.5, hood_pos - perp * 3.0 + f * -0.5 - perp * 2.0 + f * -3.5, Color(0.15, 0.05, 0.25), 1.5)
-			"WOOD_ELF":
-				draw_line(hood_pos + perp * 3.5, hood_pos + perp * 5.5 + f * 1.0, skin_col, 1.2)
-				draw_line(hood_pos - perp * 3.5, hood_pos - perp * 5.5 + f * 1.0, skin_col, 1.2)
-			"HALFLING":
-				draw_circle(Vector2.ZERO, 4.8, cloak_col)
-				draw_circle(perp * 2.5 + f * -5.0, 1.5, skin_col)
-				draw_circle(-perp * 2.5 + f * -5.0, 1.5, skin_col)
-			"DWARF":
-				draw_circle(Vector2.ZERO, 6.2, cloak_col)
-				draw_circle(f * -0.5 + Vector2(0, 1.5), 5.8, cloak_col)
-				draw_circle(face_pos - f * 1.5, 1.8, Color(0.75, 0.60, 0.40))
+		draw_arc(vis, 5.0, 0, TAU, 16, Color(0.55, 0.30, 0.95, 0.30), 1.0)
+		draw_circle(vis, 2.0, Color(0.40, 0.20, 0.75, 0.18))
+	else:
+		_draw_player_svg(vis, f, perp, cls, race)
 
-	# Wood Elf vanish shimmer — always drawn as it's an effect overlay
-	if GameManager.selected_race == "WOOD_ELF" and GameManager._vanish_active:
-		draw_arc(Vector2.ZERO, 9.0, 0, TAU, 20, Color(0.30, 0.90, 0.45, 0.45), 1.5)
+	# Wood Elf vanish shimmer
+	if race == "WOOD_ELF" and GameManager._vanish_active:
+		draw_arc(vis, 9.0, 0, TAU, 20, Color(0.30, 0.90, 0.45, 0.45), 1.5)
 
 	# ── Post-move noise arc ───────────────────────────────────────────────────
 	if _move_cooldown > 0.0 and not is_hidden:
@@ -1900,73 +1860,28 @@ func _draw():
 			draw_arc(Vector2.ZERO, 22.0 * (1.0 - t * 0.6), 0, TAU, 20,
 				Color(nc.r, nc.g, nc.b, t * 0.22), 1.2)
 
-	# ── Weapon visual ────────────────────────────────────────────────────────────
-	match weapon:
-		"SHIV":
-			# Small blade at the hip, only visible when not sneaking
-			if not is_sneaking:
-				var blade_base: Vector2 = perp * 4.5 - f * 1.0
-				draw_line(blade_base, blade_base + f * 5.0, Color(0.72, 0.72, 0.76), 1.2)
-				draw_line(blade_base, blade_base - f * 1.5, Color(0.40, 0.28, 0.15), 1.8)
-				if _shiv_thrown:  # greyed out when spent
-					draw_line(blade_base, blade_base + f * 5.0, Color(0.45, 0.45, 0.48), 1.2)
-		"SHADOW_BLADE":
-			# Longer blade with purple aura, held out front
-			var sb_base: Vector2 = perp * 3.5 + f * 1.0
-			var sb_tip:  Vector2 = sb_base + f * 7.0
-			draw_line(sb_base, sb_tip, Color(0.50, 0.25, 0.85, 0.90), 1.5)
-			draw_line(sb_base + perp * 0.8, sb_base - perp * 0.8,
-				Color(0.50, 0.25, 0.85, 0.55), 1.0)  # crossguard
-			if is_sneaking:  # glow when in shadow
-				draw_arc(sb_tip, 2.5, 0, TAU, 12, Color(0.50, 0.25, 0.85, 0.45), 1.0)
-		"CROSSBOW":
-			# Horizontal stock behind the facing direction
-			var cb_center: Vector2 = -f * 3.0
-			draw_line(cb_center - perp * 4.0, cb_center + perp * 4.0,
-				Color(0.40, 0.28, 0.15), 2.0)   # stock
-			draw_line(cb_center, cb_center + f * 5.5,
-				Color(0.55, 0.42, 0.22), 1.5)   # barrel
-			# Bolt indicator pips (one per remaining bolt)
-			for b in range(_crossbow_bolts):
-				var pip: Vector2 = cb_center + perp * (-3.0 + b * 3.0) + f * -5.0
-				draw_circle(pip, 0.8, Color(0.65, 0.65, 0.70))
-		"ARCANE_FOCUS":
-			# Glowing orb near the chest
-			var orb_pos: Vector2 = f * 2.5 + perp * -2.0
-			draw_circle(orb_pos, 2.0, Color(0.35, 0.12, 0.70, 0.80))
-			draw_arc(orb_pos, 2.5, 0, TAU, 16, Color(0.65, 0.35, 1.00, 0.55), 1.0)
-		_:  # NONE / fallback — generic daggers
-			if not is_sneaking:
-				var dagger_col := Color(0.60, 0.58, 0.62)
-				var handle_col := Color(0.35, 0.25, 0.15)
-				for side in [1, -1]:
-					var base: Vector2 = perp * (side * 4.5) - f * 1.0
-					draw_line(base, base + f * 4.0, dagger_col, 1.0)
-					draw_line(base, base - f * 1.5, handle_col, 1.5)
+	# ── Weapon visual (drawn on top of body, at vis offset) ──────────────────
+	_draw_weapon_svg(vis, f, perp)
 
-	# ── Charge attack buildup ────────────────────────────────────────────────────
+	# ── Charge attack buildup ─────────────────────────────────────────────────
 	if _attack_held and _attack_hold_t >= 0.12:
 		var ct: float = clamp((_attack_hold_t - 0.12) / (_CHARGE_THRESHOLD - 0.12), 0.0, 1.0)
-		var pulse: float = (sin(Engine.get_process_frames() * 0.35) + 1.0) * 0.5
+		var pulse: float = (sin(_anim_t * 18.0) + 1.0) * 0.5
 		var ring_r: float = 10.0 + ct * 6.0
-		# Outer glow
-		draw_arc(Vector2.ZERO, ring_r + 3.0, 0, TAU, 24,
-			Color(1.0, 0.85, 0.20, ct * 0.22), 4.0)
-		# Main ring
+		draw_arc(Vector2.ZERO, ring_r + 3.0, 0, TAU, 24, Color(1.0, 0.85, 0.20, ct * 0.22), 4.0)
 		draw_arc(Vector2.ZERO, ring_r, 0, TAU, 24,
 			Color(1.0, 0.80, 0.10, ct * 0.60 + pulse * 0.15), 2.0)
 		if ct >= 1.0:
-			# Fully charged — bright gold flare
 			draw_arc(Vector2.ZERO, ring_r - 2.0, 0, TAU, 20,
 				Color(1.0, 1.0, 0.70, 0.55 + pulse * 0.25), 1.5)
 
-	# ── Parry window — green flash ring ─────────────────────────────────────────
+	# ── Parry window ─────────────────────────────────────────────────────────
 	if _parry_t > 0.0:
 		var pf: float = _parry_t / _PARRY_WINDOW
 		draw_arc(Vector2.ZERO, 10.0 + (1.0 - pf) * 3.0, 0, TAU, 20,
 			Color(0.35, 0.95, 0.45, pf * 0.70), 2.5)
 
-	# ── Dodge i-frame shimmer ────────────────────────────────────────────────────
+	# ── Dodge i-frame shimmer ─────────────────────────────────────────────────
 	if _dodge_iframes > 0.0:
 		var df: float = _dodge_iframes / _DODGE_IFRAMES
 		draw_arc(Vector2.ZERO, 9.0 + df * 3.0, 0, TAU, 20,
@@ -1977,7 +1892,7 @@ func _draw():
 		var hf_alpha := (_hit_flash_timer / _HIT_FLASH_DURATION) * 0.45
 		draw_circle(Vector2.ZERO, 8.0, Color(1.0, 0.10, 0.10, hf_alpha))
 
-	# ── Sneak shimmer ──────────────────────────────────────────────────────────
+	# ── Sneak shimmer ─────────────────────────────────────────────────────────
 	if is_sneaking:
 		draw_arc(Vector2.ZERO, 7.5, 0, TAU, 20, Color(0.45, 0.75, 1.0, 0.22), 1.0)
 		var fa := f.angle()
@@ -1986,28 +1901,294 @@ func _draw():
 		draw_arc(Vector2.ZERO, 11.0 + pulse_a * 3.0, 0, TAU, 20,
 			Color(0.45, 0.75, 1.0, (1.0 - pulse_a) * 0.12), 0.8)
 
-	# ── Loot glint (gold orb on shoulder) ─────────────────────────────────────
+	# ── Loot glint ────────────────────────────────────────────────────────────
 	if has_loot:
-		var loot_pos := perp * -3.5 + f * 2.0 + Vector2(0, -3)
-		draw_circle(loot_pos, 2.2, Color(0.95, 0.80, 0.10))
-		draw_circle(loot_pos + Vector2(-0.5, -0.5), 0.8, Color(1.0, 0.96, 0.70))
+		var loot_pos := vis + perp * -3.5 + f * 2.0 + Vector2(0, -3)
+		var loot_bob := sin(_anim_t * 4.0) * 0.6
+		draw_circle(loot_pos + Vector2(0, loot_bob), 2.5, Color(0.95, 0.80, 0.10))
+		draw_circle(loot_pos + Vector2(-0.5, -0.5 + loot_bob), 1.0, Color(1.0, 0.96, 0.70))
+		draw_arc(loot_pos + Vector2(0, loot_bob), 3.5, 0, TAU, 12,
+			Color(0.95, 0.80, 0.10, 0.35 + abs(sin(_anim_t * 4.0)) * 0.15), 1.0)
 
-	# ── Body carry indicator ───────────────────────────────────────────────────
+	# ── Body carry indicator ──────────────────────────────────────────────────
 	if is_carrying_body:
-		var bp := -f * 5.0 + Vector2(0, 2)
+		var bp := vis - f * 5.0 + Vector2(0, 2)
 		draw_circle(bp, 3.8, Color(0.28, 0.08, 0.08, 0.80))
 		draw_arc(bp, 5.0, 0, TAU, 12, Color(0.85, 0.55, 0.30, 0.60), 1.2)
 
-	# ── Ability charge ring ────────────────────────────────────────────────────
+	# ── Ability charge ring ───────────────────────────────────────────────────
+	var max_cd: float = ABILITY_COOLDOWNS.get(cls, 10.0)
 	if ability_cooldown <= 0.0:
 		draw_arc(Vector2.ZERO, 8.5, -PI * 0.5, -PI * 0.5 + TAU, 20,
 			Color(0.55, 0.30, 0.95, 0.28), 1.0)
 	else:
-		var max_cd: float = ABILITY_COOLDOWNS.get(GameManager.selected_class, 10.0)
-		var frac: float   = 1.0 - (ability_cooldown / max_cd)
+		var frac: float = 1.0 - (ability_cooldown / max_cd)
 		if frac > 0.0:
 			draw_arc(Vector2.ZERO, 8.5, -PI * 0.5, -PI * 0.5 + TAU * frac, 20,
 				Color(0.55, 0.30, 0.95, 0.20), 1.0)
+
+# ── SVG character drawing ─────────────────────────────────────────────────────
+func _draw_player_svg(vis: Vector2, f: Vector2, perp: Vector2, cls: String, race: String):
+	var t      := _anim_t
+	var moving := _move_cooldown > 0.02
+	var sa     := 0.62 if is_sneaking else 1.0   # sneak alpha
+
+	# Class colors
+	var cloak_col: Color
+	var accent_col: Color
+	var boot_col:  Color
+	match cls:
+		"CUTPURSE":
+			cloak_col  = Color(0.28, 0.22, 0.09) if not is_sneaking else Color(0.12, 0.09, 0.04)
+			accent_col = Color(0.88, 0.68, 0.18)
+			boot_col   = Color(0.35, 0.22, 0.10)
+		"SHADOWDANCER":
+			cloak_col  = Color(0.12, 0.08, 0.22) if not is_sneaking else Color(0.05, 0.03, 0.12)
+			accent_col = Color(0.55, 0.30, 0.95)
+			boot_col   = Color(0.15, 0.10, 0.25)
+		"ASSASSIN":
+			cloak_col  = Color(0.20, 0.05, 0.05) if not is_sneaking else Color(0.08, 0.02, 0.02)
+			accent_col = Color(0.88, 0.18, 0.18)
+			boot_col   = Color(0.14, 0.05, 0.05)
+		"SELLSWORD":
+			cloak_col  = Color(0.26, 0.20, 0.10) if not is_sneaking else Color(0.14, 0.10, 0.05)
+			accent_col = Color(0.92, 0.56, 0.18)
+			boot_col   = Color(0.32, 0.20, 0.10)
+		_:
+			cloak_col  = Color(0.20, 0.16, 0.38) if not is_sneaking else Color(0.10, 0.08, 0.20)
+			accent_col = Color(0.40, 0.28, 0.72)
+			boot_col   = Color(0.18, 0.14, 0.28)
+
+	var race_data : Dictionary = GameManager.RACES.get(race, {})
+	var skin_col  : Color = race_data.get("skin", Color(0.82, 0.68, 0.52))
+
+	# Walk cycle
+	var leg_swing := sin(t * 14.0) * 2.2 if moving else 0.0
+	var bob       := sin(t * 14.0) * 0.55 if moving else 0.0
+	var arm_swing := cos(t * 14.0) * 1.2 if moving else 0.0
+	var cloak_sway:= sin(t * 5.0) * 0.4
+
+	# ── Ground shadow ─────────────────────────────────────────────────────────
+	draw_circle(vis + Vector2(0.4, 1.8), 5.2, Color(0.0, 0.0, 0.0, 0.18 * sa))
+
+	# ── Cape trailing behind ──────────────────────────────────────────────────
+	var cape_l := vis - f * 1.0 + perp * (4.8 + cloak_sway)
+	var cape_r := vis - f * 1.0 - perp * (4.8 - cloak_sway)
+	var cape_tip := vis - f * 11.0 + Vector2(0, bob * 0.3)
+	var cape_dark := Color(cloak_col.r * 0.50, cloak_col.g * 0.50, cloak_col.b * 0.55, 0.88 * sa)
+	draw_colored_polygon(PackedVector2Array([cape_l, cape_r, cape_tip]), cape_dark)
+	# Cape highlight edge
+	draw_line(cape_l, cape_tip, Color(cloak_col.r * 1.5, cloak_col.g * 1.5, cloak_col.b * 1.8, 0.28 * sa), 0.7)
+	# Inner cape sheen
+	var cape_inner_tip := vis - f * 7.0 + Vector2(0, bob * 0.2)
+	draw_colored_polygon(PackedVector2Array([
+		vis - f * 1.5 + perp * 2.5,
+		vis - f * 1.5 - perp * 2.5,
+		cape_inner_tip]),
+		Color(cloak_col.r * 0.75, cloak_col.g * 0.75, cloak_col.b * 0.80, 0.45 * sa))
+
+	# ── Legs / boots ──────────────────────────────────────────────────────────
+	var leg_l_pos := vis + perp * 2.6 + f * (-3.2 + leg_swing * 0.35) + Vector2(0, bob)
+	var leg_r_pos := vis - perp * 2.6 + f * (-3.2 - leg_swing * 0.35) + Vector2(0, -bob)
+	# Boot shaft
+	draw_circle(leg_l_pos - f * 0.5, 1.9, boot_col.darkened(0.28))
+	draw_circle(leg_r_pos - f * 0.5, 1.9, boot_col.darkened(0.28))
+	# Boot toe
+	draw_circle(leg_l_pos + f * 1.4, 1.5, boot_col)
+	draw_circle(leg_r_pos + f * 1.4, 1.5, boot_col)
+	# Boot highlight
+	draw_circle(leg_l_pos + f * 1.4 - perp * 0.6, 0.55, Color(boot_col.r * 1.55, boot_col.g * 1.55, boot_col.b * 1.4, 0.55 * sa))
+	draw_circle(leg_r_pos + f * 1.4 + perp * 0.6, 0.55, Color(boot_col.r * 1.55, boot_col.g * 1.55, boot_col.b * 1.4, 0.55 * sa))
+
+	# ── Body / torso ──────────────────────────────────────────────────────────
+	var body_pos := vis + Vector2(0, bob * 0.18)
+	draw_circle(body_pos, 4.8, cloak_col)
+	# Torso highlight (specular)
+	draw_circle(body_pos - f * 1.2 + perp * 1.0, 1.6,
+		Color(cloak_col.r * 1.7, cloak_col.g * 1.7, cloak_col.b * 1.9, 0.28 * sa))
+	# Torso rim (outline-ish effect)
+	draw_arc(body_pos, 4.8, 0, TAU, 16,
+		Color(cloak_col.r * 0.5, cloak_col.g * 0.5, cloak_col.b * 0.6, 0.55 * sa), 0.8)
+
+	# ── Arms ──────────────────────────────────────────────────────────────────
+	var arm_l := vis + perp * 5.4 + f * arm_swing * 0.25 + Vector2(0, bob * 0.15)
+	var arm_r := vis - perp * 5.4 - f * arm_swing * 0.25 + Vector2(0, -bob * 0.15)
+	var skin_d := Color(skin_col.r * 0.80, skin_col.g * 0.80, skin_col.b * 0.78, sa)
+	draw_circle(arm_l, 1.6, skin_d)
+	draw_circle(arm_r, 1.6, skin_d)
+
+	# ── Class-specific torso details ──────────────────────────────────────────
+	match cls:
+		"CUTPURSE":
+			# Gold coin pouch on belt
+			draw_circle(body_pos - f * 1.0 + perp * 3.5, 1.8, Color(0.28, 0.18, 0.08))
+			draw_circle(body_pos - f * 1.0 + perp * 3.5, 1.2, Color(accent_col.r * 0.85, accent_col.g * 0.85, accent_col.b * 0.5))
+			# Belt buckle
+			var bb := body_pos - f * 0.5
+			draw_line(bb + perp * -2.8, bb + perp * 2.8, Color(accent_col.r * 0.65, accent_col.g * 0.50, accent_col.b * 0.15, 0.65), 1.0)
+			draw_circle(bb, 0.9, Color(accent_col.r * 0.85, accent_col.g * 0.65, accent_col.b * 0.18))
+		"SHADOWDANCER":
+			# Rune sigil on chest
+			var rune_p := body_pos + f * 1.2
+			draw_arc(rune_p, 2.0, 0, TAU, 14, Color(accent_col.r, accent_col.g, accent_col.b, 0.45 * sa), 0.8)
+			draw_line(rune_p - perp * 1.5, rune_p + perp * 1.5, Color(accent_col.r, accent_col.g, accent_col.b, 0.35 * sa), 0.7)
+			draw_line(rune_p - f * 1.5, rune_p + f * 1.5, Color(accent_col.r, accent_col.g, accent_col.b, 0.35 * sa), 0.7)
+		"ASSASSIN":
+			# Crossbelt leather straps
+			draw_line(body_pos - perp * 4.0 + f * 2.0, body_pos + perp * 4.0 - f * 2.0,
+				Color(accent_col.r * 0.55, accent_col.g * 0.18, accent_col.b * 0.18, 0.65 * sa), 1.0)
+			draw_line(body_pos + perp * 4.0 + f * 2.0, body_pos - perp * 4.0 - f * 2.0,
+				Color(accent_col.r * 0.55, accent_col.g * 0.18, accent_col.b * 0.18, 0.65 * sa), 1.0)
+		"SELLSWORD":
+			# Pauldrons (shoulder pads)
+			var paul_c := Color(0.58, 0.52, 0.48)
+			draw_circle(body_pos + perp * 4.5, 2.4, paul_c.darkened(0.2))
+			draw_circle(body_pos - perp * 4.5, 2.4, paul_c.darkened(0.2))
+			draw_circle(body_pos + perp * 4.5 + f * 0.3, 1.2, paul_c.lightened(0.12))
+			draw_circle(body_pos - perp * 4.5 + f * 0.3, 1.2, paul_c.lightened(0.12))
+
+	# ── Hood / head ───────────────────────────────────────────────────────────
+	var head_pos := vis + f * 3.6 + Vector2(0, bob * 0.45)
+	var hood_dark := cloak_col.darkened(0.2)
+	draw_circle(head_pos, 3.2, hood_dark)
+	# Hood fold lines
+	draw_arc(head_pos - f * 1.0, 2.8, f.angle() + PI - 1.0, f.angle() + PI + 1.0, 8,
+		Color(cloak_col.r * 0.65, cloak_col.g * 0.65, cloak_col.b * 0.72, 0.40 * sa), 0.8)
+	# Hood opening rim — accent color
+	draw_arc(head_pos, 3.2, f.angle() - 0.95, f.angle() + 0.95, 10,
+		Color(accent_col.r, accent_col.g, accent_col.b, 0.60 * sa), 1.1)
+	# Face (skin) visible in hood opening
+	var face_pos := head_pos + f * 1.5
+	draw_circle(face_pos, 1.6, skin_col)
+	# Eyes
+	var eye_l := face_pos + perp * 0.55 - f * 0.2
+	var eye_r := face_pos - perp * 0.55 - f * 0.2
+	draw_circle(eye_l, 0.45, Color(0.05, 0.04, 0.08))
+	draw_circle(eye_r, 0.45, Color(0.05, 0.04, 0.08))
+
+	# ── Race-specific details ─────────────────────────────────────────────────
+	match race:
+		"TIEFLING":
+			# Demon horns curving back
+			draw_line(head_pos + perp * 2.8 - f * 0.5,
+				head_pos + perp * 3.5 - f * 3.0, Color(0.18, 0.06, 0.30), 1.6)
+			draw_line(head_pos - perp * 2.8 - f * 0.5,
+				head_pos - perp * 3.5 - f * 3.0, Color(0.18, 0.06, 0.30), 1.6)
+			# Hellfire eye glow
+			draw_circle(eye_l, 0.5, Color(0.95, 0.25, 0.05, 0.85))
+			draw_circle(eye_r, 0.5, Color(0.95, 0.25, 0.05, 0.85))
+		"WOOD_ELF":
+			# Pointed ears extending to the sides
+			draw_line(head_pos + perp * 3.0, head_pos + perp * 5.2 + f * 1.2,
+				Color(skin_col.r * 0.88, skin_col.g * 0.88, skin_col.b * 0.80), 1.5)
+			draw_line(head_pos - perp * 3.0, head_pos - perp * 5.2 + f * 1.2,
+				Color(skin_col.r * 0.88, skin_col.g * 0.88, skin_col.b * 0.80), 1.5)
+			# Leaf-green eye glow
+			draw_circle(eye_l, 0.5, Color(0.28, 0.85, 0.38, 0.90))
+			draw_circle(eye_r, 0.5, Color(0.28, 0.85, 0.38, 0.90))
+		"HALFLING":
+			# Slightly oversized head and rounder hood
+			draw_circle(head_pos, 3.6, hood_dark)
+			draw_circle(face_pos - f * 0.2, 1.9, skin_col)
+			# Rosy cheeks
+			draw_circle(face_pos + perp * 1.2 - f * 0.3, 0.7, Color(0.88, 0.48, 0.38, 0.45))
+			draw_circle(face_pos - perp * 1.2 - f * 0.3, 0.7, Color(0.88, 0.48, 0.38, 0.45))
+		"DWARF":
+			# Broader body and proud beard
+			draw_circle(body_pos + perp * 5.2, 1.4, Color(0.52, 0.42, 0.28))  # extra width
+			draw_circle(body_pos - perp * 5.2, 1.4, Color(0.52, 0.42, 0.28))
+			# Braided beard
+			var beard_col := Color(0.72, 0.55, 0.28, 0.80)
+			draw_circle(face_pos - f * 0.8 + Vector2(0, 2.0), 1.8, beard_col)
+			draw_circle(face_pos - f * 0.4 + Vector2(0, 3.5), 1.2, beard_col.darkened(0.1))
+			draw_circle(face_pos + Vector2(0, 4.8), 0.8, beard_col.darkened(0.2))
+
+func _draw_weapon_svg(vis: Vector2, f: Vector2, perp: Vector2):
+	var t := _anim_t
+	# Weapon bob with movement
+	var w_bob := sin(t * 14.0) * 0.4 if _move_cooldown > 0.02 else 0.0
+
+	match weapon:
+		"SHIV":
+			if not is_sneaking:
+				var base := vis + perp * 4.8 - f * 0.5 + Vector2(0, w_bob)
+				draw_line(base, base + f * 5.5, Color(0.78, 0.78, 0.82), 1.3)
+				draw_line(base + f * 5.5, base + f * 5.5 + perp * 0.8, Color(0.78, 0.78, 0.82), 0.8)
+				draw_line(base, base - f * 1.8, Color(0.38, 0.25, 0.12), 1.8)
+				if _shiv_thrown:
+					draw_line(base, base + f * 5.5, Color(0.42, 0.42, 0.44, 0.60), 1.3)
+		"STILETTO", "ASSASSIN_FANG":
+			var base := vis + perp * 4.2 + f * 1.0 + Vector2(0, w_bob)
+			var tip  := base + f * 7.5
+			draw_line(base, tip, Color(0.82, 0.80, 0.88), 1.2)
+			draw_line(base + perp * 0.6, base - perp * 0.6, Color(0.65, 0.60, 0.70), 1.0)
+			draw_circle(tip, 0.6, Color(1.0, 1.0, 1.0, 0.70))
+			if weapon == "ASSASSIN_FANG":
+				draw_arc(tip, 1.8, 0, TAU, 10, Color(0.72, 0.28, 0.85, 0.55), 0.8)
+		"SHADOW_BLADE", "GHOST_BLADE", "VOID_REAPER":
+			var sb_base := vis + perp * 3.2 + f * 1.2 + Vector2(0, w_bob)
+			var sb_tip  := sb_base + f * 8.5
+			var blade_col := Color(0.45, 0.22, 0.88, 0.92)
+			if weapon == "GHOST_BLADE": blade_col = Color(0.30, 0.80, 0.65, 0.88)
+			if weapon == "VOID_REAPER": blade_col = Color(0.10, 0.08, 0.22, 0.95)
+			draw_line(sb_base, sb_tip, blade_col, 1.6)
+			draw_line(sb_base + perp * 1.0, sb_base - perp * 1.0, blade_col.lightened(0.15), 1.0)
+			var glow_a: float = 0.40 + abs(sin(t * 3.0)) * 0.18
+			draw_circle(sb_tip, 2.0, Color(blade_col.r, blade_col.g, blade_col.b, glow_a * (0.6 if is_sneaking else 0.35)))
+			# Trailing phantom trail when charges available
+			if weapon in ["GHOST_BLADE", "VOID_REAPER"] and _ghost_blade_strikes_left > 0:
+				draw_line(sb_base + f * -1.5, sb_base, Color(blade_col.r, blade_col.g, blade_col.b, 0.30), 0.7)
+		"GARROTE":
+			var gr_l := vis + perp * 5.0 + f * -0.5 + Vector2(0, w_bob)
+			var gr_r := vis - perp * 5.0 + f * -0.5 + Vector2(0, w_bob)
+			draw_line(gr_l, gr_r, Color(0.55, 0.48, 0.35), 1.0)
+			draw_circle(gr_l, 1.0, Color(0.38, 0.25, 0.12))
+			draw_circle(gr_r, 1.0, Color(0.38, 0.25, 0.12))
+		"LONGSWORD", "BROADSWORD", "BLADESONG":
+			var sw_base := vis + perp * 4.0 + Vector2(0, w_bob)
+			var sw_tip  := sw_base + f * 9.0
+			var sw_col  := Color(0.80, 0.78, 0.85) if weapon == "LONGSWORD" \
+				else (Color(0.88, 0.82, 0.90) if weapon == "BROADSWORD" else Color(0.62, 0.85, 0.72))
+			draw_line(sw_base, sw_tip, sw_col, 2.0 if weapon == "BROADSWORD" else 1.4)
+			draw_line(sw_base + perp * 1.5, sw_base - perp * 1.5, Color(0.65, 0.60, 0.45), 1.2)  # crossguard
+			if weapon == "BLADESONG":
+				draw_circle(sw_tip, 1.5, Color(0.35, 0.92, 0.55, 0.45 + abs(sin(t * 5.0)) * 0.25))
+		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT":
+			var cb := vis - f * 3.0 + Vector2(0, w_bob)
+			draw_line(cb - perp * 4.5, cb + perp * 4.5, Color(0.38, 0.25, 0.12), 2.0)
+			draw_line(cb, cb + f * 6.0, Color(0.52, 0.40, 0.20), 1.5)
+			draw_rect(Rect2(cb + f * 1.5 - Vector2(1, 2), Vector2(2, 4)), Color(0.30, 0.22, 0.10))
+			for b in range(min(_crossbow_bolts, 5)):
+				var pip := cb + perp * (-4.0 + b * 2.0) + f * -5.5
+				draw_circle(pip, 0.9, Color(0.68, 0.65, 0.72))
+			if weapon == "REPEATING_CROSSBOW":
+				draw_circle(cb + f * 5.5, 1.2, Color(0.90, 0.55, 0.18, 0.65))
+			if weapon == "SILENT_BOLT":
+				draw_circle(cb + f * 5.5, 1.2, Color(0.42, 0.52, 0.72, 0.70))
+		"ARCANE_FOCUS":
+			var orb := vis + f * 3.0 + perp * -1.8 + Vector2(0, w_bob)
+			var orb_pulse: float = abs(sin(t * 3.5)) * 0.22
+			draw_circle(orb, 2.2, Color(0.28, 0.10, 0.60, 0.85))
+			draw_arc(orb, 2.6 + orb_pulse, 0, TAU, 18, Color(0.65, 0.35, 1.00, 0.55), 1.0)
+			draw_circle(orb - f * 0.5 + perp * -0.5, 0.7, Color(0.85, 0.72, 1.0, 0.70))
+		"RUNED_BLADE":
+			var rb_base := vis + perp * 3.8 + f * 1.0 + Vector2(0, w_bob)
+			var rb_tip  := rb_base + f * 8.0
+			draw_line(rb_base, rb_tip, Color(0.75, 0.72, 0.82), 1.4)
+			# Runic charges glow
+			for ci in range(_runed_blade_charges):
+				var rune_p := rb_base + f * (2.0 + ci * 2.0)
+				draw_circle(rune_p, 1.0, Color(0.50, 0.20, 0.80, 0.70 + abs(sin(t * 4.0 + ci)) * 0.25))
+		_:
+			# Generic daggers
+			if not is_sneaking:
+				var dc := Color(0.62, 0.60, 0.65)
+				var hc := Color(0.38, 0.26, 0.14)
+				for side in [1, -1]:
+					var dbase: Vector2 = vis + perp * (side * 4.8) - f * 0.8 + Vector2(0, w_bob)
+					draw_line(dbase, dbase + f * 5.0, dc, 1.1)
+					draw_line(dbase, dbase - f * 1.8, hc, 1.7)
+					draw_circle(dbase + f * 4.8, 0.7, Color(1.0, 1.0, 1.0, 0.35))
 
 func take_damage_flash():
 	GameManager.reset_combo()
