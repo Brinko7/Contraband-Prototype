@@ -2212,7 +2212,6 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 	# Class colors
 	var cloak_col: Color
 	var accent_col: Color
-	var boot_col:  Color
 	match cls:
 		"CUTPURSE":
 			cloak_col  = Color(0.28, 0.22, 0.09) if not is_sneaking else Color(0.12, 0.09, 0.04)
@@ -2235,14 +2234,7 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 			accent_col = Color(0.40, 0.28, 0.72)
 			boot_col   = Color(0.18, 0.14, 0.28)
 
-	var race_data : Dictionary = GameManager.RACES.get(race, {})
-	var skin_col  : Color = race_data.get("skin", Color(0.82, 0.68, 0.52))
-
-	# Walk cycle
-	var leg_swing := sin(t * 14.0) * 2.2 if moving else 0.0
-	var bob       := sin(t * 14.0) * 0.55 if moving else 0.0
-	var arm_swing := cos(t * 14.0) * 1.2 if moving else 0.0
-	var cloak_sway:= sin(t * 5.0) * 0.4
+	var cloak_sway: float = sin(t * 5.0) * 0.4
 
 	# ── Ground shadow ─────────────────────────────────────────────────────────
 	draw_circle(vis + Vector2(0.4, 1.8), 5.2, Color(0.0, 0.0, 0.0, 0.18 * sa))
