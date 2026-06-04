@@ -1928,10 +1928,286 @@ func _draw():
 				Color(0.55, 0.30, 0.95, 0.20), 1.0)
 
 # ── SVG character drawing ─────────────────────────────────────────────────────
-func _draw_player_svg(vis: Vector2, f: Vector2, perp: Vector2, cls: String, race: String):
-	var t      := _anim_t
-	var moving := _move_cooldown > 0.02
-	var sa     := 0.62 if is_sneaking else 1.0   # sneak alpha
+func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, race: String):
+	# ── Isometric 3/4 perspective character renderer ──────────────────────────
+	# Painter's algorithm: shadow → back leg → boots → torso (3 faces) → cape →
+	# arms → head → race features → hood/helmet
+	var t: float        = _anim_t
+	var moving: bool    = _move_cooldown > 0.02
+	var sa: float       = 0.72 if is_sneaking else 1.0
+	var lunge_t: float  = _lunge_t if "_lunge_t" in self else 0.0
+	var lunge_off: Vector2 = f * sin(lunge_t * PI) * 4.0 if lunge_t > 0.0 else Vector2.ZERO
+	var sneak_off: Vector2 = Vector2(0, 2.0) if is_sneaking else Vector2.ZERO
+	var vis: Vector2    = vis_in + lunge_off + sneak_off
+
+	# Walk cycle
+	var swing_speed: float = 9.0
+	var leg_swing: float   = sin(t * swing_speed) * 2.5
+	if is_sneaking: leg_swing *= 0.5
+	if not moving:  leg_swing = 0.0
+	var bob: float    = (abs(sin(t * swing_speed)) * 0.7) if moving else 0.0
+	if is_sneaking:   bob *= 0.4
+	var arm_swing: float  = cos(t * swing_speed) * 1.5 if moving else 0.0
+	var cape_flap: float  = sin(t * 3.2) * 1.5
+
+	# Class palette
+	var pants_col: Color
+	var torso_front: Color
+	var trim_col: Color
+	var boot_col: Color
+	match cls:
+		"CUTPURSE":
+			pants_col   = Color(0.28, 0.22, 0.12)
+			torso_front = Color(0.40, 0.26, 0.12)
+			trim_col    = Color(0.88, 0.68, 0.18)
+			boot_col    = Color(0.32, 0.20, 0.10)
+		"SHADOWDANCER":
+			pants_col   = Color(0.10, 0.08, 0.18)
+			torso_front = Color(0.16, 0.08, 0.28)
+			trim_col    = Color(0.60, 0.18, 0.92)
+			boot_col    = Color(0.16, 0.10, 0.26)
+		"ASSASSIN":
+			pants_col   = Color(0.08, 0.08, 0.10)
+			torso_front = Color(0.10, 0.10, 0.12)
+			trim_col    = Color(0.80, 0.06, 0.10)
+			boot_col    = Color(0.06, 0.06, 0.08)
+		_:
+			pants_col   = Color(0.20, 0.16, 0.30)
+			torso_front = Color(0.22, 0.18, 0.36)
+			trim_col    = Color(0.55, 0.45, 0.85)
+			boot_col    = Color(0.18, 0.14, 0.24)
+
+	var rd: Dictionary = GameManager.RACES.get(race, {})
+	var skin_col: Color = rd.get("skin", Color(0.82, 0.68, 0.52))
+
+	# Lunge state
+	var lunging: bool = lunge_t > 0.0
+
+	# ── A. Ground shadow ──────────────────────────────────────────────────────
+	var shadow_pos: Vector2 = vis + f * 0.6 + Vector2(0, 1.6)
+	draw_colored_polygon(_iso_ellipse(shadow_pos, 6.0, 2.4, 12), Color(0, 0, 0, 0.40 * sa))
+
+	# ── B. Legs (back leg first) ──────────────────────────────────────────────
+	var leg_back_off: Vector2  = -perp * 2.5 + f * (leg_swing if not lunging else -3.0)
+	var leg_front_off: Vector2 =  perp * 2.5 + f * (-leg_swing if not lunging else 1.0)
+	_draw_iso_leg(vis + leg_back_off,  pants_col.darkened(0.18), bob * 0.5, sa)
+	_draw_iso_leg(vis + leg_front_off, pants_col,                bob,        sa)
+
+	# ── C. Boots (isometric boxes) ────────────────────────────────────────────
+	_draw_iso_boot(vis + leg_back_off  + Vector2(0, 4.5), f, perp, boot_col.darkened(0.20), sa)
+	_draw_iso_boot(vis + leg_front_off + Vector2(0, 4.5), f, perp, boot_col, sa)
+
+	# ── D. Torso (3-face isometric box) ───────────────────────────────────────
+	var tw: float = 4.5
+	var td: float = 2.5
+	var th: float = 8.0
+	var b: float  = bob
+	# Front face
+	var front_face := PackedVector2Array([
+		vis + Vector2(-tw, -th + b),
+		vis + Vector2( tw, -th + b),
+		vis + Vector2( tw + td * 0.4, -th * 0.12 + td * 0.5 + b),
+		vis + Vector2(-tw + td * 0.4, -th * 0.12 + td * 0.5 + b),
+	])
+	# Right shadow face
+	var right_face := PackedVector2Array([
+		vis + Vector2(tw, -th + b),
+		vis + Vector2(tw + td, -th + td * 0.5 + b),
+		vis + Vector2(tw + td, td * 0.5 + b),
+		vis + Vector2(tw + td * 0.4, -th * 0.12 + td * 0.5 + b),
+	])
+	# Top face
+	var top_face := PackedVector2Array([
+		vis + Vector2(-tw, -th + b),
+		vis + Vector2( tw, -th + b),
+		vis + Vector2( tw + td, -th + td * 0.5 + b),
+		vis + Vector2(-tw + td, -th + td * 0.5 + b),
+	])
+	draw_colored_polygon(right_face, _shade(torso_front, -0.35, sa))
+	draw_colored_polygon(front_face, _shade(torso_front,  0.00, sa))
+	draw_colored_polygon(top_face,   _shade(torso_front,  0.22, sa))
+	# Crisp outline
+	var outline_col: Color = Color(0.04, 0.03, 0.06, 0.85 * sa)
+	draw_polyline(front_face + PackedVector2Array([front_face[0]]), outline_col, 0.6)
+	draw_polyline(top_face   + PackedVector2Array([top_face[0]]),   outline_col, 0.6)
+
+	# Class-specific torso details
+	match cls:
+		"CUTPURSE":
+			# Vest seam down the middle
+			draw_line(vis + Vector2(td * 0.2, -th + b + 0.5),
+				vis + Vector2(td * 0.3, -th * 0.15 + b), Color(0.18, 0.12, 0.05, 0.85 * sa), 0.6)
+			# Belt
+			draw_line(vis + Vector2(-tw + 0.5, -th * 0.25 + b),
+				vis + Vector2( tw - 0.5, -th * 0.25 + b), Color(0.20, 0.13, 0.05, sa), 1.0)
+			# Buckle
+			draw_circle(vis + Vector2(td * 0.2, -th * 0.25 + b), 0.7, trim_col)
+		"SHADOWDANCER":
+			# Purple trim on top edge
+			draw_line(vis + Vector2(-tw, -th + b),
+				vis + Vector2( tw, -th + b), Color(trim_col.r, trim_col.g, trim_col.b, 0.85 * sa), 0.9)
+			# Rune sigil
+			var r_p: Vector2 = vis + Vector2(td * 0.2, -th * 0.45 + b)
+			draw_arc(r_p, 1.6, 0, TAU, 12, Color(trim_col.r, trim_col.g, trim_col.b, 0.55 * sa), 0.6)
+			draw_line(r_p - Vector2(1.2, 0), r_p + Vector2(1.2, 0), Color(trim_col.r, trim_col.g, trim_col.b, 0.55 * sa), 0.5)
+		"ASSASSIN":
+			# Red shoulder plate (top-left)
+			var pauldron := PackedVector2Array([
+				vis + Vector2(-tw - 0.5, -th + b),
+				vis + Vector2(-tw + 2.0, -th + b),
+				vis + Vector2(-tw + 2.4, -th + 1.4 + b),
+				vis + Vector2(-tw - 0.3, -th + 1.6 + b),
+			])
+			draw_colored_polygon(pauldron, _shade(trim_col, 0.10, sa))
+			draw_polyline(pauldron + PackedVector2Array([pauldron[0]]), outline_col, 0.5)
+			# Crossbelt
+			draw_line(vis + Vector2(-tw + 0.3, -th + 2.0 + b),
+				vis + Vector2( tw - 0.3, -th * 0.1 + b), Color(0.20, 0.04, 0.06, 0.80 * sa), 0.7)
+
+	# ── E. Cape (SHADOWDANCER / ASSASSIN) ─────────────────────────────────────
+	if cls == "SHADOWDANCER" or cls == "ASSASSIN":
+		_draw_cape(vis, f, perp, cls, t, b, cape_flap, sa, trim_col)
+
+	# ── F. Arms ───────────────────────────────────────────────────────────────
+	var inward: float = 0.8 if is_sneaking else 0.0
+	# Right arm (off-hand) hangs at side
+	var r_shoulder: Vector2 = vis + Vector2( tw - 0.5 - inward, -th + 1.0 + b)
+	var r_hand: Vector2     = vis + Vector2( tw + 0.5 - inward, -th * 0.35 + b + arm_swing)
+	_draw_iso_arm(r_shoulder, r_hand, torso_front.darkened(0.25), skin_col, sa)
+	# Left arm (weapon arm) — forward & up; extended on lunge
+	var l_extend: float = 3.5 if lunging else 0.0
+	var l_shoulder: Vector2 = vis + Vector2(-tw + 0.5 + inward, -th + 1.0 + b)
+	var l_hand: Vector2     = vis + Vector2(-tw - 1.5 + inward, -th * 0.55 + b - arm_swing) + f * l_extend
+	_draw_iso_arm(l_shoulder, l_hand, torso_front.darkened(0.18), skin_col, sa)
+
+	# ── G. Head (isometric 3/4) ───────────────────────────────────────────────
+	var head_r: float = 5.5
+	if race == "HALFLING": head_r *= 1.12
+	if race == "DWARF":    head_r *= 1.05
+	var head_pos: Vector2 = vis + Vector2(td * 0.5, -th - head_r * 1.1 + b)
+
+	# Hood backing (drawn first so face is in front)
+	var hood_back_col: Color
+	match cls:
+		"CUTPURSE":     hood_back_col = Color(0.18, 0.12, 0.06, 0.92 * sa)
+		"SHADOWDANCER": hood_back_col = Color(0.06, 0.04, 0.14, 0.95 * sa)
+		"ASSASSIN":     hood_back_col = Color(0.05, 0.05, 0.07, 0.95 * sa)
+		_:              hood_back_col = Color(0.10, 0.08, 0.18, 0.90 * sa)
+	draw_circle(head_pos + Vector2(-0.6, -0.4), head_r + 1.4, hood_back_col)
+
+	# Head skin: base + shadow + highlight (3-value shading)
+	draw_circle(head_pos, head_r, _shade(skin_col, 0.00, sa))
+	draw_circle(head_pos + Vector2(-1.5, 1.0), head_r * 0.75, _shade(skin_col, -0.30, sa))
+	draw_circle(head_pos + Vector2( 1.0, -1.5), head_r * 0.45, _shade(skin_col, 0.25, sa))
+	# Crisp head outline
+	draw_arc(head_pos, head_r, 0, TAU, 22, outline_col, 0.6)
+
+	# Eyes (class-tinted glow)
+	var eye_col: Color
+	match cls:
+		"CUTPURSE":     eye_col = Color(0.95, 0.82, 0.28)
+		"SHADOWDANCER": eye_col = Color(0.82, 0.42, 1.00)
+		"ASSASSIN":     eye_col = Color(0.98, 0.28, 0.18)
+		_:              eye_col = Color(0.90, 0.85, 0.70)
+	var eye_r_size: float = 1.5 if race == "HALFLING" else 1.1
+	var eye_lp: Vector2 = head_pos + Vector2(-1.8, 0.8)
+	var eye_rp: Vector2 = head_pos + Vector2( 1.4, 0.8)
+	draw_circle(eye_lp, eye_r_size, Color(0.02, 0.02, 0.04, sa))
+	draw_circle(eye_rp, eye_r_size, Color(0.02, 0.02, 0.04, sa))
+	draw_circle(eye_lp, eye_r_size * 0.65, Color(eye_col.r, eye_col.g, eye_col.b, sa))
+	draw_circle(eye_rp, eye_r_size * 0.65, Color(eye_col.r, eye_col.g, eye_col.b, sa))
+
+	# Race features
+	match race:
+		"TIEFLING":
+			var horn_col: Color = Color(0.16, 0.06, 0.10, sa)
+			draw_arc(head_pos + Vector2(-3, -4), 3.5, PI * 0.3, PI * 1.0, 10, horn_col, 1.5)
+			draw_arc(head_pos + Vector2( 3, -4), 3.5, PI * 0.0, PI * 0.7, 10, horn_col, 1.5)
+			# Horn highlights
+			draw_arc(head_pos + Vector2(-3, -4), 3.5, PI * 0.5, PI * 0.8, 6, Color(0.45, 0.10, 0.18, 0.7 * sa), 0.6)
+		"WOOD_ELF":
+			var ear_col: Color = _shade(skin_col, -0.10, sa)
+			draw_colored_polygon(PackedVector2Array([
+				head_pos + Vector2(-head_r * 0.9, -0.5),
+				head_pos + Vector2(-head_r - 2.2, -2.5),
+				head_pos + Vector2(-head_r * 0.7,  1.2),
+			]), ear_col)
+			draw_colored_polygon(PackedVector2Array([
+				head_pos + Vector2(head_r * 0.9, -0.5),
+				head_pos + Vector2(head_r + 2.2, -2.5),
+				head_pos + Vector2(head_r * 0.7,  1.2),
+			]), ear_col)
+		"DWARF":
+			var beard_col: Color = Color(0.72, 0.55, 0.28, sa)
+			for i in range(3):
+				var x: float = -1.6 + float(i) * 1.6
+				draw_line(head_pos + Vector2(x, head_r * 0.5),
+					head_pos + Vector2(x * 0.7, head_r + 2.4),
+					beard_col, 1.4)
+			# Wider jaw shading
+			draw_circle(head_pos + Vector2(0, head_r * 0.4), head_r * 0.55, beard_col.darkened(0.15))
+		"HALFLING":
+			# Rosy cheeks
+			draw_circle(head_pos + Vector2(-2.8, 1.8), 1.0, Color(0.92, 0.48, 0.42, 0.45 * sa))
+			draw_circle(head_pos + Vector2( 2.4, 1.8), 1.0, Color(0.92, 0.48, 0.42, 0.45 * sa))
+
+	# Hood / helmet (front overlay)
+	match cls:
+		"CUTPURSE":
+			# Tight hood wrapping top of head down sides
+			var hood_col: Color = Color(0.35, 0.22, 0.10, sa)
+			draw_colored_polygon(PackedVector2Array([
+				head_pos + Vector2(-head_r - 0.5, -0.8),
+				head_pos + Vector2(-head_r * 0.6, -head_r - 1.4),
+				head_pos + Vector2( head_r * 0.4, -head_r - 1.6),
+				head_pos + Vector2( head_r + 0.4, -1.4),
+				head_pos + Vector2( head_r - 0.5,  0.6),
+				head_pos + Vector2( head_r * 0.2, -1.0),
+				head_pos + Vector2(-head_r * 0.4, -1.2),
+				head_pos + Vector2(-head_r + 0.3,  0.4),
+			]), _shade(hood_col, 0.00, sa))
+			# Top highlight
+			draw_arc(head_pos + Vector2(-0.3, -1.0), head_r + 0.3, PI * 1.1, PI * 1.85, 10,
+				_shade(hood_col, 0.30, sa), 0.8)
+		"SHADOWDANCER":
+			# Deep cowl extending forward
+			var cowl_col: Color = Color(0.05, 0.03, 0.12, sa)
+			draw_colored_polygon(PackedVector2Array([
+				head_pos + Vector2(-head_r - 1.2, -1.0),
+				head_pos + Vector2(-head_r * 0.4, -head_r - 2.4),
+				head_pos + Vector2( head_r * 0.6, -head_r - 2.2),
+				head_pos + Vector2( head_r + 1.8, -0.4),
+				head_pos + Vector2( head_r + 0.6,  2.2),
+				head_pos + Vector2( head_r * 0.2, -0.4),
+				head_pos + Vector2(-head_r * 0.6, -0.6),
+				head_pos + Vector2(-head_r - 0.4,  1.8),
+			]), cowl_col)
+			# Inner purple glow
+			draw_arc(head_pos + Vector2(0, -0.2), head_r + 0.6, PI * 0.05, PI * 0.95, 14,
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.45 * sa), 0.8)
+			draw_arc(head_pos + Vector2(0, -0.2), head_r + 1.6, PI * 0.1, PI * 0.9, 12,
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.20 * sa), 1.4)
+		"ASSASSIN":
+			# Half-visor across forehead+nose (eyes glow through)
+			var visor: PackedVector2Array = PackedVector2Array([
+				head_pos + Vector2(-head_r - 0.2, -0.4),
+				head_pos + Vector2(-head_r * 0.7, -head_r * 0.95),
+				head_pos + Vector2( head_r * 0.8, -head_r * 0.9),
+				head_pos + Vector2( head_r + 0.2, -0.2),
+				head_pos + Vector2( head_r * 0.6,  1.6),
+				head_pos + Vector2(-head_r * 0.6,  1.7),
+			])
+			draw_colored_polygon(visor, Color(0.18, 0.18, 0.22, sa))
+			# Eye slit highlight
+			draw_line(head_pos + Vector2(-head_r * 0.7, 0.4),
+				head_pos + Vector2( head_r * 0.7, 0.4),
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.55 * sa), 0.6)
+			# Re-draw glowing eyes over the visor
+			draw_circle(eye_lp, eye_r_size * 0.85, Color(eye_col.r, eye_col.g, eye_col.b, sa))
+			draw_circle(eye_rp, eye_r_size * 0.85, Color(eye_col.r, eye_col.g, eye_col.b, sa))
+			# Glow halo
+			draw_circle(eye_lp, eye_r_size * 1.6, Color(eye_col.r, eye_col.g, eye_col.b, 0.25 * sa))
+			draw_circle(eye_rp, eye_r_size * 1.6, Color(eye_col.r, eye_col.g, eye_col.b, 0.25 * sa))
 
 	# Class colors
 	var cloak_col: Color
@@ -2104,91 +2380,157 @@ func _draw_player_svg(vis: Vector2, f: Vector2, perp: Vector2, cls: String, race
 			draw_circle(face_pos + Vector2(0, 4.8), 0.8, beard_col.darkened(0.2))
 
 func _draw_weapon_svg(vis: Vector2, f: Vector2, perp: Vector2):
-	var t := _anim_t
-	# Weapon bob with movement
-	var w_bob := sin(t * 14.0) * 0.4 if _move_cooldown > 0.02 else 0.0
+	var t: float = _anim_t
+	var w_bob: float = sin(t * 9.0) * 0.4 if _move_cooldown > 0.02 else 0.0
+	var lunge_t: float = _lunge_t if "_lunge_t" in self else 0.0
+	var lunge_extend: float = sin(lunge_t * PI) * 3.5 if lunge_t > 0.0 else 0.0
+
+	# Hold anchor: forward and up, at left hand
+	var grip: Vector2 = vis + f * (5.0 + lunge_extend) + perp * 2.0 + Vector2(0, -9 + w_bob)
+	var fwd: Vector2 = f
+	var side: Vector2 = perp
 
 	match weapon:
-		"SHIV":
-			if not is_sneaking:
-				var base := vis + perp * 4.8 - f * 0.5 + Vector2(0, w_bob)
-				draw_line(base, base + f * 5.5, Color(0.78, 0.78, 0.82), 1.3)
-				draw_line(base + f * 5.5, base + f * 5.5 + perp * 0.8, Color(0.78, 0.78, 0.82), 0.8)
-				draw_line(base, base - f * 1.8, Color(0.38, 0.25, 0.12), 1.8)
-				if _shiv_thrown:
-					draw_line(base, base + f * 5.5, Color(0.42, 0.42, 0.44, 0.60), 1.3)
+		"SHIV", "DAGGER":
+			var reversed: bool = is_sneaking
+			var dir_v: Vector2 = -fwd if reversed else fwd
+			_draw_blade_tapered(grip, dir_v, side, 7.0, 1.6, 0.4, Color(0.82, 0.80, 0.88), Color(1.0, 0.98, 0.95))
+			_draw_grip(grip, dir_v, side, 3.5, Color(0.38, 0.25, 0.12))
+			if weapon == "SHIV" and _shiv_thrown:
+				draw_line(grip, grip + dir_v * 6.0, Color(0.42, 0.42, 0.44, 0.60), 1.3)
 		"STILETTO", "ASSASSIN_FANG":
-			var base := vis + perp * 4.2 + f * 1.0 + Vector2(0, w_bob)
-			var tip  := base + f * 7.5
-			draw_line(base, tip, Color(0.82, 0.80, 0.88), 1.2)
-			draw_line(base + perp * 0.6, base - perp * 0.6, Color(0.65, 0.60, 0.70), 1.0)
-			draw_circle(tip, 0.6, Color(1.0, 1.0, 1.0, 0.70))
+			_draw_blade_tapered(grip, fwd, side, 8.0, 1.4, 0.3, Color(0.86, 0.84, 0.92), Color(1.0, 1.0, 1.0))
+			# Small crossguard
+			draw_line(grip + side * 1.2, grip - side * 1.2, Color(0.55, 0.45, 0.20), 1.0)
+			_draw_grip(grip, fwd, side, 3.5, Color(0.30, 0.20, 0.08))
+			var stip: Vector2 = grip + fwd * 8.0
+			draw_circle(stip, 0.7, Color(1.0, 1.0, 1.0, 0.75))
 			if weapon == "ASSASSIN_FANG":
-				draw_arc(tip, 1.8, 0, TAU, 10, Color(0.72, 0.28, 0.85, 0.55), 0.8)
-		"SHADOW_BLADE", "GHOST_BLADE", "VOID_REAPER":
-			var sb_base := vis + perp * 3.2 + f * 1.2 + Vector2(0, w_bob)
-			var sb_tip  := sb_base + f * 8.5
-			var blade_col := Color(0.45, 0.22, 0.88, 0.92)
-			if weapon == "GHOST_BLADE": blade_col = Color(0.30, 0.80, 0.65, 0.88)
-			if weapon == "VOID_REAPER": blade_col = Color(0.10, 0.08, 0.22, 0.95)
-			draw_line(sb_base, sb_tip, blade_col, 1.6)
-			draw_line(sb_base + perp * 1.0, sb_base - perp * 1.0, blade_col.lightened(0.15), 1.0)
-			var glow_a: float = 0.40 + abs(sin(t * 3.0)) * 0.18
-			draw_circle(sb_tip, 2.0, Color(blade_col.r, blade_col.g, blade_col.b, glow_a * (0.6 if is_sneaking else 0.35)))
-			# Trailing phantom trail when charges available
+				draw_arc(stip, 1.8, 0, TAU, 10, Color(0.72, 0.28, 0.85, 0.55 + abs(sin(t*4.0))*0.3), 0.8)
+		"SHORTSWORD":
+			_draw_blade_tapered(grip, fwd, side, 10.0, 2.0, 0.5, Color(0.82, 0.80, 0.88), Color(1.0, 0.98, 0.95))
+			draw_line(grip + side * 1.8, grip - side * 1.8, Color(0.62, 0.50, 0.22), 1.2)
+			_draw_grip(grip, fwd, side, 4.0, Color(0.40, 0.26, 0.12))
+			draw_circle(grip - fwd * 4.2, 0.9, Color(0.85, 0.65, 0.20))
+		"SHADOW_BLADE", "GHOST_BLADE", "VOID_REAPER", "SMOKE_BLADE":
+			var blade_col: Color = Color(0.55, 0.20, 0.85)
+			if weapon == "GHOST_BLADE": blade_col = Color(0.40, 0.85, 0.70)
+			if weapon == "VOID_REAPER": blade_col = Color(0.20, 0.12, 0.32)
+			if weapon == "SMOKE_BLADE": blade_col = Color(0.55, 0.20, 0.78)
+			_draw_blade_tapered(grip, fwd, side, 10.0, 2.0, 0.5, blade_col, blade_col.lightened(0.35))
+			_draw_grip(grip, fwd, side, 4.0, Color(0.18, 0.10, 0.20))
+			var stip2: Vector2 = grip + fwd * 10.0
+			var glow_a: float = 0.40 + abs(sin(t * 3.0)) * 0.20
+			draw_circle(stip2, 2.0, Color(blade_col.r, blade_col.g, blade_col.b, glow_a))
+			if weapon == "SMOKE_BLADE":
+				for i in range(3):
+					var wisp: Vector2 = stip2 + Vector2(sin(t*5.0 + float(i)*2.1)*1.5, -float(i)*2.5)
+					draw_circle(wisp, 1.2 - float(i)*0.3, Color(0.5, 0.1, 0.7, 0.35 - float(i)*0.10))
 			if weapon in ["GHOST_BLADE", "VOID_REAPER"] and _ghost_blade_strikes_left > 0:
-				draw_line(sb_base + f * -1.5, sb_base, Color(blade_col.r, blade_col.g, blade_col.b, 0.30), 0.7)
+				draw_line(grip - fwd * 1.5, grip, Color(blade_col.r, blade_col.g, blade_col.b, 0.30), 0.7)
 		"GARROTE":
-			var gr_l := vis + perp * 5.0 + f * -0.5 + Vector2(0, w_bob)
-			var gr_r := vis - perp * 5.0 + f * -0.5 + Vector2(0, w_bob)
-			draw_line(gr_l, gr_r, Color(0.55, 0.48, 0.35), 1.0)
-			draw_circle(gr_l, 1.0, Color(0.38, 0.25, 0.12))
-			draw_circle(gr_r, 1.0, Color(0.38, 0.25, 0.12))
-		"LONGSWORD", "BROADSWORD", "BLADESONG":
-			var sw_base := vis + perp * 4.0 + Vector2(0, w_bob)
-			var sw_tip  := sw_base + f * 9.0
-			var sw_col  := Color(0.80, 0.78, 0.85) if weapon == "LONGSWORD" \
-				else (Color(0.88, 0.82, 0.90) if weapon == "BROADSWORD" else Color(0.62, 0.85, 0.72))
-			draw_line(sw_base, sw_tip, sw_col, 2.0 if weapon == "BROADSWORD" else 1.4)
-			draw_line(sw_base + perp * 1.5, sw_base - perp * 1.5, Color(0.65, 0.60, 0.45), 1.2)  # crossguard
-			if weapon == "BLADESONG":
-				draw_circle(sw_tip, 1.5, Color(0.35, 0.92, 0.55, 0.45 + abs(sin(t * 5.0)) * 0.25))
-		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT":
-			var cb := vis - f * 3.0 + Vector2(0, w_bob)
-			draw_line(cb - perp * 4.5, cb + perp * 4.5, Color(0.38, 0.25, 0.12), 2.0)
-			draw_line(cb, cb + f * 6.0, Color(0.52, 0.40, 0.20), 1.5)
-			draw_rect(Rect2(cb + f * 1.5 - Vector2(1, 2), Vector2(2, 4)), Color(0.30, 0.22, 0.10))
-			for b in range(min(_crossbow_bolts, 5)):
-				var pip := cb + perp * (-4.0 + b * 2.0) + f * -5.5
-				draw_circle(pip, 0.9, Color(0.68, 0.65, 0.72))
-			if weapon == "REPEATING_CROSSBOW":
-				draw_circle(cb + f * 5.5, 1.2, Color(0.90, 0.55, 0.18, 0.65))
-			if weapon == "SILENT_BOLT":
-				draw_circle(cb + f * 5.5, 1.2, Color(0.42, 0.52, 0.72, 0.70))
-		"ARCANE_FOCUS":
-			var orb := vis + f * 3.0 + perp * -1.8 + Vector2(0, w_bob)
-			var orb_pulse: float = abs(sin(t * 3.5)) * 0.22
-			draw_circle(orb, 2.2, Color(0.28, 0.10, 0.60, 0.85))
-			draw_arc(orb, 2.6 + orb_pulse, 0, TAU, 18, Color(0.65, 0.35, 1.00, 0.55), 1.0)
-			draw_circle(orb - f * 0.5 + perp * -0.5, 0.7, Color(0.85, 0.72, 1.0, 0.70))
+			var gr_l: Vector2 = grip + side * 3.0
+			var gr_r: Vector2 = grip - side * 3.0
+			draw_line(gr_l, gr_r, Color(0.85, 0.82, 0.78), 0.8)
+			# Glint highlight
+			draw_line(gr_l + fwd * 0.4, gr_r + fwd * 0.4, Color(1.0, 1.0, 1.0, 0.5), 0.4)
+			_draw_iso_grip_handle(gr_l, fwd, side, Color(0.38, 0.25, 0.12))
+			_draw_iso_grip_handle(gr_r, fwd, side, Color(0.38, 0.25, 0.12))
+		"LONGSWORD":
+			_draw_blade_tapered(grip, fwd, side, 14.0, 2.4, 0.6, Color(0.80, 0.80, 0.92), Color(1.0, 1.0, 1.0))
+			# Fuller groove
+			draw_line(grip + fwd * 1.0, grip + fwd * 13.0, Color(0.62, 0.62, 0.74), 0.5)
+			# Ornate guard wings
+			draw_colored_polygon(PackedVector2Array([
+				grip + side * 2.6, grip + side * 1.0 + fwd * 0.6, grip + side * 1.0 - fwd * 0.6,
+			]), Color(0.70, 0.55, 0.18))
+			draw_colored_polygon(PackedVector2Array([
+				grip - side * 2.6, grip - side * 1.0 + fwd * 0.6, grip - side * 1.0 - fwd * 0.6,
+			]), Color(0.70, 0.55, 0.18))
+			_draw_grip(grip, fwd, side, 5.0, Color(0.30, 0.18, 0.08))
+			draw_circle(grip - fwd * 5.2, 1.0, Color(0.85, 0.65, 0.20))
+		"BROADSWORD":
+			_draw_blade_tapered(grip, fwd, side, 13.0, 3.0, 0.9, Color(0.55, 0.55, 0.65), Color(0.85, 0.85, 0.95))
+			# Large crossguard
+			draw_line(grip + side * 3.4, grip - side * 3.4, Color(0.45, 0.36, 0.18), 1.6)
+			draw_line(grip + side * 3.4 + fwd * 0.3, grip - side * 3.4 + fwd * 0.3, Color(0.65, 0.52, 0.24), 0.6)
+			_draw_grip(grip, fwd, side, 5.0, Color(0.28, 0.16, 0.06))
+			draw_circle(grip - fwd * 5.4, 1.2, Color(0.78, 0.60, 0.20))
+		"BLADESONG":
+			# Translucent blade with pulsing glow
+			_draw_blade_tapered(grip, fwd, side, 13.0, 2.2, 0.5, Color(0.6, 0.9, 1.0, 0.75), Color(0.9, 1.0, 1.0, 0.9))
+			# 3 rune lines perpendicular
+			for i in range(3):
+				var rp: Vector2 = grip + fwd * (3.0 + float(i) * 3.0)
+				draw_line(rp + side * 0.9, rp - side * 0.9, Color(0.5, 0.95, 1.0, 0.7), 0.5)
+			var bt: Vector2 = grip + fwd * 13.0
+			draw_circle(bt, 1.8, Color(0.5, 0.95, 1.0, sin(t*4.0)*0.25 + 0.35))
+			draw_line(grip + side * 2.0, grip - side * 2.0, Color(0.7, 0.85, 0.95), 1.0)
+			_draw_grip(grip, fwd, side, 4.5, Color(0.18, 0.30, 0.40))
+		"VENOM_NEEDLE":
+			draw_line(grip, grip + fwd * 7.0, Color(0.85, 0.82, 0.90), 0.8)
+			draw_circle(grip + fwd * 7.0, 0.9, Color(0.2, 0.9, 0.3))
+			draw_circle(grip + fwd * 7.0, 1.6, Color(0.2, 0.9, 0.3, 0.35))
+			_draw_grip(grip, fwd, side, 2.5, Color(0.20, 0.18, 0.22))
+		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT", "HAND_CROSSBOW":
+			var scale: float = 0.55 if weapon == "HAND_CROSSBOW" else 1.0
+			_draw_iso_crossbow(grip, fwd, side, scale, weapon, t)
+			# Bolt magazine pips
+			for b_i in range(min(_crossbow_bolts, 5)):
+				var pip: Vector2 = grip + side * (-3.0 + float(b_i) * 1.4) * scale + fwd * -5.5 * scale
+				draw_circle(pip, 0.8 * scale, Color(0.68, 0.65, 0.72))
 		"RUNED_BLADE":
-			var rb_base := vis + perp * 3.8 + f * 1.0 + Vector2(0, w_bob)
-			var rb_tip  := rb_base + f * 8.0
-			draw_line(rb_base, rb_tip, Color(0.75, 0.72, 0.82), 1.4)
-			# Runic charges glow
-			for ci in range(_runed_blade_charges):
-				var rune_p := rb_base + f * (2.0 + ci * 2.0)
-				draw_circle(rune_p, 1.0, Color(0.50, 0.20, 0.80, 0.70 + abs(sin(t * 4.0 + ci)) * 0.25))
+			# Dark blade with orange runes
+			_draw_blade_tapered(grip, fwd, side, 11.0, 2.2, 0.5, Color(0.22, 0.18, 0.28), Color(0.45, 0.35, 0.55))
+			for ci in range(max(_runed_blade_charges, 1)):
+				var rune_p: Vector2 = grip + fwd * (2.5 + float(ci) * 2.2)
+				var pulse_a: float = 0.70 + abs(sin(t * 4.0 + float(ci))) * 0.25
+				draw_line(rune_p + side * 0.9, rune_p - side * 0.9, Color(0.95, 0.55, 0.12, pulse_a), 0.7)
+			_draw_grip(grip, fwd, side, 4.0, Color(0.15, 0.10, 0.18))
+		"STAFF":
+			var staff_top: Vector2 = grip + fwd * -3.0 + Vector2(0, -4)
+			var staff_bot: Vector2 = grip + fwd * 3.0 + Vector2(0, 12)
+			draw_line(staff_top, staff_bot, Color(0.42, 0.28, 0.14), 1.6)
+			draw_line(staff_top, staff_bot, Color(0.62, 0.45, 0.22), 0.5)
+			# Ornate cap
+			draw_colored_polygon(PackedVector2Array([
+				staff_top + Vector2(-1.5, 0.5), staff_top + Vector2(1.5, 0.5),
+				staff_top + Vector2(1.0, -1.5), staff_top + Vector2(-1.0, -1.5),
+			]), Color(0.75, 0.60, 0.20))
+			var orb_r: float = 3.0 + sin(t * 2.0) * 0.5
+			draw_circle(staff_top + Vector2(0, -3.5), orb_r + 1.0, Color(0.6, 0.3, 0.95, 0.30))
+			draw_circle(staff_top + Vector2(0, -3.5), orb_r, Color(0.6, 0.3, 0.95))
+			draw_circle(staff_top + Vector2(-0.6, -4.2), orb_r * 0.4, Color(0.95, 0.80, 1.0, 0.8))
+		"ARCANE_FOCUS":
+			var orb: Vector2 = grip
+			draw_circle(orb, 4.0, Color(0.5, 0.3, 0.9, 0.30))
+			draw_circle(orb, 3.0, Color(0.5, 0.3, 0.9))
+			draw_circle(orb - fwd * 0.6 + side * -0.6, 1.0, Color(0.95, 0.85, 1.0, 0.85))
+			for i in range(3):
+				var ang: float = t * 2.5 + float(i) * TAU / 3.0
+				var part: Vector2 = orb + Vector2(cos(ang) * 5.0, sin(ang) * 2.5)
+				draw_circle(part, 1.0, Color(0.7, 0.4, 1.0, 0.85))
+				draw_circle(part, 1.8, Color(0.7, 0.4, 1.0, 0.30))
+		"WAND":
+			draw_line(grip - fwd * 2.0, grip + fwd * 5.0, Color(0.32, 0.20, 0.10), 1.4)
+			draw_line(grip - fwd * 2.0, grip + fwd * 5.0, Color(0.55, 0.36, 0.18), 0.5)
+			var wt: Vector2 = grip + fwd * 5.5
+			draw_circle(wt, 1.4, Color(0.8, 0.3, 0.95))
+			draw_circle(wt, 0.7, Color(1.0, 0.8, 1.0, 0.85))
+			# Sparkle radials
+			for i in range(4):
+				var ang2: float = t * 1.5 + float(i) * PI * 0.5
+				var s_end: Vector2 = wt + Vector2(cos(ang2), sin(ang2)) * (1.8 + sin(t*3.0 + float(i))*0.4)
+				draw_line(wt, s_end, Color(1.0, 0.7, 1.0, 0.65), 0.4)
 		_:
-			# Generic daggers
+			# Generic fallback: paired daggers
 			if not is_sneaking:
-				var dc := Color(0.62, 0.60, 0.65)
-				var hc := Color(0.38, 0.26, 0.14)
-				for side in [1, -1]:
-					var dbase: Vector2 = vis + perp * (side * 4.8) - f * 0.8 + Vector2(0, w_bob)
-					draw_line(dbase, dbase + f * 5.0, dc, 1.1)
-					draw_line(dbase, dbase - f * 1.8, hc, 1.7)
-					draw_circle(dbase + f * 4.8, 0.7, Color(1.0, 1.0, 1.0, 0.35))
+				var dc: Color = Color(0.62, 0.60, 0.65)
+				var hc: Color = Color(0.38, 0.26, 0.14)
+				for s_i in [1, -1]:
+					var dbase: Vector2 = vis + perp * (float(s_i) * 4.8) - f * 0.8 + Vector2(0, w_bob)
+					_draw_blade_tapered(dbase, fwd, side, 5.0, 1.2, 0.3, dc, Color(1.0, 1.0, 1.0))
+					_draw_grip(dbase, fwd, side, 2.0, hc)
 
 func take_damage_flash():
 	GameManager.reset_combo()
@@ -2202,3 +2544,204 @@ func is_position_blocked(target_pos: Vector2) -> bool:
 	query.position = target_pos
 	query.exclude  = [self]
 	return space.intersect_point(query).size() > 0
+
+# ── Drawing helpers (isometric 3/4 perspective) ───────────────────────────────
+
+func _shade(c: Color, amount: float, a_mul: float = 1.0) -> Color:
+	# amount > 0 lightens, < 0 darkens
+	var r: Color = c
+	if amount > 0.0:
+		r = c.lightened(amount)
+	elif amount < 0.0:
+		r = c.darkened(-amount)
+	return Color(r.r, r.g, r.b, c.a * a_mul)
+
+func _iso_ellipse(center: Vector2, rx: float, ry: float, steps: int) -> PackedVector2Array:
+	var pts: PackedVector2Array = PackedVector2Array()
+	for i in range(steps):
+		var a: float = float(i) / float(steps) * TAU
+		pts.append(center + Vector2(cos(a) * rx, sin(a) * ry))
+	return pts
+
+func _draw_iso_leg(top: Vector2, col: Color, b: float, sa: float) -> void:
+	# Tapered leg poly (4 verts): wider at hip, narrower at boot
+	var hip_l: Vector2  = top + Vector2(-1.6, -2.0 + b)
+	var hip_r: Vector2  = top + Vector2( 1.6, -2.0 + b)
+	var boot_l: Vector2 = top + Vector2(-1.1, 4.0)
+	var boot_r: Vector2 = top + Vector2( 1.1, 4.0)
+	var poly: PackedVector2Array = PackedVector2Array([hip_l, hip_r, boot_r, boot_l])
+	draw_colored_polygon(poly, _shade(col, 0.00, sa))
+	# Front highlight strip
+	draw_line(hip_l + Vector2(0.3, 0.4), boot_l + Vector2(0.2, -0.2), _shade(col, 0.25, sa * 0.8), 0.4)
+	# Outline
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.04, 0.03, 0.06, 0.75 * sa), 0.5)
+
+func _draw_iso_boot(pos: Vector2, fwd: Vector2, side: Vector2, col: Color, sa: float) -> void:
+	var w: float = 2.0
+	var d: float = 1.6
+	var h: float = 1.6
+	# Front face
+	var front: PackedVector2Array = PackedVector2Array([
+		pos + Vector2(-w, -h), pos + Vector2(w, -h),
+		pos + Vector2(w, h),   pos + Vector2(-w, h),
+	])
+	# Top face (toe extends forward along fwd)
+	var toe_ext: Vector2 = fwd * 1.8
+	var top_p: PackedVector2Array = PackedVector2Array([
+		pos + Vector2(-w, -h), pos + Vector2(w, -h),
+		pos + Vector2(w, -h) + toe_ext, pos + Vector2(-w, -h) + toe_ext,
+	])
+	# Right shadow face
+	var rside: PackedVector2Array = PackedVector2Array([
+		pos + Vector2(w, -h), pos + Vector2(w, -h) + toe_ext,
+		pos + Vector2(w, h)  + toe_ext * 0.6, pos + Vector2(w, h),
+	])
+	draw_colored_polygon(rside, _shade(col, -0.35, sa))
+	draw_colored_polygon(front, _shade(col,  0.00, sa))
+	draw_colored_polygon(top_p, _shade(col,  0.22, sa))
+	draw_polyline(front + PackedVector2Array([front[0]]), Color(0.03, 0.02, 0.05, 0.85 * sa), 0.4)
+	draw_polyline(top_p + PackedVector2Array([top_p[0]]), Color(0.03, 0.02, 0.05, 0.85 * sa), 0.4)
+
+func _draw_iso_arm(shoulder: Vector2, hand: Vector2, sleeve: Color, skin: Color, sa: float) -> void:
+	# Skinny arm: shoulder → elbow → hand (slight bend)
+	var mid: Vector2 = shoulder.lerp(hand, 0.5) + Vector2(0, 0.6)
+	var dir_v: Vector2 = (hand - shoulder).normalized() if hand != shoulder else Vector2.RIGHT
+	var n: Vector2 = Vector2(-dir_v.y, dir_v.x)
+	# Upper arm poly
+	var ua: PackedVector2Array = PackedVector2Array([
+		shoulder + n * 1.1, shoulder - n * 1.1,
+		mid - n * 0.9, mid + n * 0.9,
+	])
+	# Forearm poly
+	var fa: PackedVector2Array = PackedVector2Array([
+		mid + n * 0.9, mid - n * 0.9,
+		hand - n * 0.7, hand + n * 0.7,
+	])
+	draw_colored_polygon(ua, _shade(sleeve, 0.00, sa))
+	draw_colored_polygon(fa, _shade(sleeve, -0.10, sa))
+	draw_polyline(ua + PackedVector2Array([ua[0]]), Color(0.04, 0.03, 0.06, 0.7 * sa), 0.4)
+	draw_polyline(fa + PackedVector2Array([fa[0]]), Color(0.04, 0.03, 0.06, 0.7 * sa), 0.4)
+	# Wrist skin & hand
+	draw_circle(hand, 1.2, _shade(skin, 0.00, sa))
+	draw_circle(hand + Vector2(-0.3, -0.3), 0.5, _shade(skin, 0.25, sa))
+
+func _draw_cape(vis: Vector2, fwd: Vector2, side: Vector2, cls: String, t: float, b: float, flap: float, sa: float, trim: Color) -> void:
+	var back_dir: Vector2 = -fwd
+	var c1: Vector2 = vis + Vector2(-4.5, -7.5 + b)
+	var c2: Vector2 = vis + Vector2( 4.5, -7.5 + b)
+	var c_mid_l: Vector2 = vis + Vector2(-5.5 + back_dir.x * 2.0, -2.0 + b) + back_dir * 2.0
+	var c_mid_r: Vector2 = vis + Vector2( 5.5 + back_dir.x * 2.0, -2.0 + b) + back_dir * 2.0
+	var c_low_l: Vector2 = vis + Vector2(-4.0, 2.0) + back_dir * (5.0 + flap)
+	var c_low_r: Vector2 = vis + Vector2( 4.0, 2.0) + back_dir * (5.0 - flap * 0.5)
+	var c_tip:   Vector2 = vis + Vector2(0, 3.5) + back_dir * (7.0 + flap * 0.4) + Vector2(0, sin(t * 2.4) * 0.6)
+	var c_inner: Vector2 = vis + Vector2(0, -2.0 + b) + back_dir * 1.0
+	var cape_col: Color
+	if cls == "SHADOWDANCER":
+		cape_col = Color(0.18, 0.08, 0.32, 0.92 * sa)
+	else:
+		cape_col = Color(0.08, 0.08, 0.12, 0.94 * sa)
+	var poly: PackedVector2Array = PackedVector2Array([
+		c1, c_inner, c2, c_mid_r, c_low_r, c_tip, c_low_l, c_mid_l,
+	])
+	draw_colored_polygon(poly, cape_col)
+	# Inner sheen
+	draw_colored_polygon(PackedVector2Array([
+		c1, c_inner, c2,
+		c2.lerp(c_tip, 0.45), c_tip.lerp(c1, 0.55),
+	]), Color(cape_col.r * 1.7, cape_col.g * 1.7, cape_col.b * 1.9, 0.30 * sa))
+	# Outline
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.02, 0.01, 0.04, 0.8 * sa), 0.5)
+	if cls == "ASSASSIN":
+		# Red trim along bottom edge
+		draw_line(c_low_l, c_tip, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.6)
+		draw_line(c_tip,   c_low_r, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.6)
+	else:
+		# Purple trim
+		draw_line(c1, c_mid_l, Color(trim.r, trim.g, trim.b, 0.60 * sa), 0.5)
+		draw_line(c2, c_mid_r, Color(trim.r, trim.g, trim.b, 0.60 * sa), 0.5)
+
+func _draw_blade_tapered(base: Vector2, fwd: Vector2, side: Vector2, length: float, base_w: float, tip_w: float, blade_col: Color, edge_col: Color) -> void:
+	var tip: Vector2 = base + fwd * length
+	var bw: float = base_w * 0.5
+	var tw_v: float = tip_w * 0.5
+	var poly: PackedVector2Array = PackedVector2Array([
+		base + side * bw, tip + side * tw_v,
+		tip - side * tw_v, base - side * bw,
+	])
+	# Shadow half (dark)
+	draw_colored_polygon(PackedVector2Array([
+		base + side * bw, tip + side * tw_v, tip, base,
+	]), Color(blade_col.r * 0.55, blade_col.g * 0.55, blade_col.b * 0.65, blade_col.a))
+	# Light half
+	draw_colored_polygon(PackedVector2Array([
+		base, tip, tip - side * tw_v, base - side * bw,
+	]), blade_col)
+	# Bright edge highlight
+	draw_line(base - side * bw * 0.9, tip - side * tw_v * 0.9, edge_col, 0.5)
+	# Outline
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.04, 0.03, 0.06, 0.85), 0.4)
+
+func _draw_grip(base: Vector2, fwd: Vector2, side: Vector2, length: float, col: Color) -> void:
+	var back: Vector2 = base - fwd * length
+	var w: float = 0.9
+	var poly: PackedVector2Array = PackedVector2Array([
+		base + side * w, back + side * w,
+		back - side * w, base - side * w,
+	])
+	draw_colored_polygon(poly, col)
+	draw_line(base + side * w * 0.4, back + side * w * 0.4, col.lightened(0.3), 0.4)
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.03, 0.02, 0.05, 0.85), 0.4)
+
+func _draw_iso_grip_handle(pos: Vector2, fwd: Vector2, side: Vector2, col: Color) -> void:
+	var poly: PackedVector2Array = PackedVector2Array([
+		pos + side * 0.9 + fwd * -0.6, pos + side * 0.9 + fwd * 0.6,
+		pos - side * 0.9 + fwd * 0.6,  pos - side * 0.9 + fwd * -0.6,
+	])
+	draw_colored_polygon(poly, col)
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.03, 0.02, 0.05, 0.9), 0.4)
+
+func _draw_iso_crossbow(grip: Vector2, fwd: Vector2, side: Vector2, scale: float, kind: String, t: float) -> void:
+	# Stock body (grip + body forward)
+	var stock: PackedVector2Array = PackedVector2Array([
+		grip + side * 0.8 * scale + fwd * -2.0 * scale,
+		grip + side * 0.8 * scale + fwd *  5.5 * scale,
+		grip - side * 0.8 * scale + fwd *  5.5 * scale,
+		grip - side * 0.8 * scale + fwd * -2.0 * scale,
+	])
+	draw_colored_polygon(stock, Color(0.42, 0.28, 0.14))
+	draw_polyline(stock + PackedVector2Array([stock[0]]), Color(0.05, 0.03, 0.04, 0.9), 0.4)
+	# Arms (perpendicular to fwd)
+	var arm_pos: Vector2 = grip + fwd * 3.0 * scale
+	var arm_l: Vector2 = arm_pos + side * 4.5 * scale
+	var arm_r: Vector2 = arm_pos - side * 4.5 * scale
+	draw_line(arm_pos, arm_l, Color(0.38, 0.25, 0.12), 1.6 * scale)
+	draw_line(arm_pos, arm_r, Color(0.38, 0.25, 0.12), 1.6 * scale)
+	# Tip caps
+	draw_circle(arm_l, 0.6 * scale, Color(0.62, 0.45, 0.20))
+	draw_circle(arm_r, 0.6 * scale, Color(0.62, 0.45, 0.20))
+	# String across arms
+	draw_line(arm_l, arm_r, Color(0.85, 0.82, 0.75), 0.4)
+	# Loaded bolt
+	draw_line(grip + fwd * 2.0 * scale, grip + fwd * 7.0 * scale, Color(0.55, 0.42, 0.20), 0.6)
+	# Magazine box for REPEATING_CROSSBOW
+	if kind == "REPEATING_CROSSBOW":
+		var mag: PackedVector2Array = PackedVector2Array([
+			grip + side * 1.4 * scale + fwd * 1.0 * scale,
+			grip + side * 1.4 * scale + fwd * 4.5 * scale,
+			grip + side * 0.2 * scale + fwd * 4.5 * scale,
+			grip + side * 0.2 * scale + fwd * 1.0 * scale,
+		])
+		draw_colored_polygon(mag, Color(0.32, 0.22, 0.10))
+		draw_polyline(mag + PackedVector2Array([mag[0]]), Color(0.04, 0.03, 0.04, 0.9), 0.4)
+		draw_circle(grip + fwd * 5.8 * scale, 0.9 * scale, Color(0.90, 0.55, 0.18, 0.65))
+	elif kind == "SILENT_BOLT":
+		# Dark cylinder at front (suppressor)
+		var sup: PackedVector2Array = PackedVector2Array([
+			grip + side * 0.6 * scale + fwd * 5.5 * scale,
+			grip + side * 0.6 * scale + fwd * 8.0 * scale,
+			grip - side * 0.6 * scale + fwd * 8.0 * scale,
+			grip - side * 0.6 * scale + fwd * 5.5 * scale,
+		])
+		draw_colored_polygon(sup, Color(0.18, 0.18, 0.20))
+		draw_polyline(sup + PackedVector2Array([sup[0]]), Color(0.04, 0.03, 0.05, 0.95), 0.4)
+		draw_circle(grip + fwd * 6.7 * scale, 0.5 * scale, Color(0.42, 0.52, 0.72, 0.70))
