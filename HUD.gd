@@ -30,6 +30,16 @@ var _shop_panel     = null  # ShopPanel node2D
 var _passive_active  := false
 var _passive_choices: Array = []
 
+# ── Level-up state ────────────────────────────────────────────────────────────
+var _level_up_active  := false
+var _level_up_choices: Array = []
+
+# ── Relic notify banner ───────────────────────────────────────────────────────
+var _relic_banner_text  := ""
+var _relic_banner_color := Color.WHITE
+var _relic_banner_t     := 0.0
+const _RELIC_BANNER_DUR := 3.0
+
 # ── Inventory screen ─────────────────────────────────────────────────────────
 var _inv_screen: CanvasLayer = null
 
@@ -66,6 +76,8 @@ func _ready():
 	GameManager.show_passive_pick.connect(_on_show_passive_pick)
 	GameManager.reinforcement_incoming.connect(_on_reinforcement_incoming)
 	GameManager.death_save_rolled.connect(_on_death_save_rolled)
+	GameManager.relic_collected.connect(_on_relic_collected)
+	GameManager.show_level_up.connect(_on_show_level_up)
 	overlay.visible = false
 	_build_runtime_ui()
 	_show_floor_intro.call_deferred()
@@ -220,6 +232,30 @@ func _build_runtime_ui():
 	minimap.position = Vector2(-120, 4)
 	$Control.add_child(minimap)
 
+	# ── Relic row (bottom-right, above objective) ────────────────────────────
+	var relic_bar := Control.new()
+	relic_bar.name = "RelicBar"
+	relic_bar.set_script(load("res://RelicBar.gd"))
+	relic_bar.anchor_left   = 1.0
+	relic_bar.anchor_right  = 1.0
+	relic_bar.anchor_top    = 1.0
+	relic_bar.anchor_bottom = 1.0
+	relic_bar.offset_left   = -260.0
+	relic_bar.offset_right  = -8.0
+	relic_bar.offset_top    = -54.0
+	relic_bar.offset_bottom = -36.0
+	relic_bar.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	$Control.add_child(relic_bar)
+
+	# ── XP bar (top-left, just below hud panel) ───────────────────────────────
+	var xp_bar := Control.new()
+	xp_bar.name = "XPBar"
+	xp_bar.set_script(load("res://XPBar.gd"))
+	xp_bar.position = Vector2(6, 118)
+	xp_bar.custom_minimum_size = Vector2(224, 14)
+	xp_bar.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	$Control.add_child(xp_bar)
+
 func _show_floor_intro():
 	overlay.visible = true
 	overlay.color = Color(0.0, 0.0, 0.0, 0.88)
@@ -282,6 +318,51 @@ func _on_death_save_rolled(roll: int, survived: bool):
 		popup.setup("DEATH SAVE: %d ✗ CAUGHT" % roll, Color(1.00, 0.15, 0.15))
 	popup.global_position = pos
 	get_tree().root.add_child(popup)
+
+# ── Relic notifications ────────────────────────────────────────────────────────
+func _on_relic_collected(relic_id: String) -> void:
+	var rdata: Dictionary = GameManager.get_relic_data_by_id(relic_id)
+	_relic_banner_text  = "RELIC: %s — %s" % [rdata.get("name", relic_id), rdata.get("desc", "")]
+	_relic_banner_color = rdata.get("color", Color(0.95, 0.78, 0.15))
+	_relic_banner_t     = _RELIC_BANNER_DUR
+	AudioManager.loot_pickup()
+
+# ── Level-up overlay ──────────────────────────────────────────────────────────
+func _on_show_level_up(choices: Array) -> void:
+	_level_up_choices = choices
+	_level_up_active  = true
+	overlay.visible   = true
+	_refresh_level_up_ui()
+
+func _refresh_level_up_ui() -> void:
+	overlay.color = Color(0.04, 0.06, 0.02, 0.96)
+	overlay_title.add_theme_font_size_override("font_size", 34)
+	overlay_title.text = "━━  LEVEL UP!  ━━"
+	overlay_title.modulate = Color(0.40, 1.00, 0.55)
+	overlay_rating.text = "Level %d  ·  Choose a permanent upgrade for this run" % GameManager.run_level
+	overlay_rating.modulate = Color(0.70, 0.90, 0.50)
+	const CHOICE_BTNS := ["X", "Y", "B"]
+	var lines := ""
+	for i in range(_level_up_choices.size()):
+		var c = _level_up_choices[i]
+		var btn: String = CHOICE_BTNS[i] if i < CHOICE_BTNS.size() else str(i + 1)
+		lines += "[%d/%s]  %-20s  %s\n" % [i + 1, btn, c.name, c.desc]
+	overlay_desc.add_theme_font_size_override("font_size", 13)
+	overlay_desc.set_offset(SIDE_LEFT, -320)
+	overlay_desc.set_offset(SIDE_RIGHT, 320)
+	overlay_desc.text = lines
+	overlay_desc.modulate = Color(0.88, 0.95, 0.78)
+	overlay_stats.text = "Run Level: %d  ·  XP to next: %d / %d" % [
+		GameManager.run_level, GameManager.run_xp, GameManager.XP_PER_LEVEL]
+	overlay_stats.modulate = Color(0.40, 0.85, 0.40)
+	overlay_hint.text = "[1/X]  [2/Y]  [3/B]  Choose upgrade"
+	overlay_hint.modulate = Color(0.55, 0.65, 0.45)
+
+func _pick_level_up(idx: int) -> void:
+	if idx < _level_up_choices.size():
+		GameManager.apply_level_up_choice(_level_up_choices[idx].id)
+	_level_up_active = false
+	overlay.visible  = false
 
 # ── Passive pick ──────────────────────────────────────────────────────────────
 func _on_show_passive_pick():
@@ -480,6 +561,12 @@ func _close_equip():
 # ── Per-frame update ──────────────────────────────────────────────────────────
 func _process(delta):
 	_hud_t += delta
+	# Relic banner countdown (always runs regardless of state)
+	if _relic_banner_t > 0.0:
+		_relic_banner_t -= delta
+		var xp_bar := $Control.get_node_or_null("XPBar")
+		if xp_bar:
+			xp_bar.queue_redraw()
 	if GameManager.state == GameManager.State.PASSIVE_PICK:
 		return
 	if GameManager.state == GameManager.State.SHOPPING:
@@ -510,6 +597,13 @@ func _process(delta):
 		var is_final := GameManager.current_floor >= GameManager.MAX_FLOORS
 		status_label.text = "ESCAPE NOW" if is_final else "→ SUPPLY CACHE"
 		status_label.modulate = Color(0.3, 1.0, 0.5)
+	elif player.has_meta("phantom_entry_timer"):
+		var pt: float = player.get_meta("phantom_entry_timer")
+		status_label.text = "◈ PHANTOM  %.0fs" % pt
+		status_label.modulate = Color(0.65, 0.35, 1.00)
+	elif player.has_meta("disguised"):
+		status_label.text = "◈ DISGUISED"
+		status_label.modulate = Color(0.55, 0.90, 0.65)
 	elif is_sneaking:
 		status_label.text = "— SNEAKING —"
 		status_label.modulate = Color(0.50, 0.80, 1.0)
@@ -559,13 +653,21 @@ func _process(delta):
 
 	# ── Objective (bottom-right) ──────────────────────────────────────────────
 	var obj_label := $Control.get_node_or_null("ObjectiveLabel") as Label
-	if obj_label and GameManager.floor_objective != "NONE":
-		var done := GameManager.check_objective_complete()
-		var marker := "✓" if done else "○"
-		obj_label.text = "%s  %s  +%d gp" % [marker, GameManager.floor_objective_name, GameManager.floor_objective_bonus]
-		obj_label.modulate = Color(0.40, 1.00, 0.45, 0.90) if done else Color(0.70, 0.70, 0.55, 0.70)
-	elif obj_label:
-		obj_label.text = ""
+	if obj_label:
+		var lines := ""
+		if GameManager.floor_objective != "NONE":
+			var done := GameManager.check_objective_complete()
+			var marker := "✓" if done else "○"
+			lines = "%s  %s  +%d gp" % [marker, GameManager.floor_objective_name, GameManager.floor_objective_bonus]
+			obj_label.modulate = Color(0.40, 1.00, 0.45, 0.90) if done else Color(0.70, 0.70, 0.55, 0.70)
+		if GameManager.active_contract != "NONE":
+			var contract_done := GameManager.check_contract_complete()
+			var c_marker := "★" if contract_done else "◇"
+			var c_line := "%s  %s  +%d gp" % [c_marker, GameManager.contract_name, GameManager.contract_bonus]
+			lines = (lines + "\n" + c_line) if lines != "" else c_line
+			if not contract_done:
+				obj_label.modulate = Color(0.70, 0.70, 0.55, 0.70)
+		obj_label.text = lines
 
 	# ── Ability label (bottom-left, above item boxes) ─────────────────────────
 	var ab_lbl := $Control.get_node_or_null("AbilityLabel") as Label
@@ -654,6 +756,11 @@ func _input(event):
 			AudioManager.ui_confirm()
 			get_viewport().set_input_as_handled()
 		return
+	if _level_up_active:
+		if event.is_action_pressed("menu_slot_1"):    _pick_level_up(0); AudioManager.ui_confirm()
+		elif event.is_action_pressed("menu_slot_2"):  _pick_level_up(1); AudioManager.ui_confirm()
+		elif event.is_action_pressed("menu_slot_3"):  _pick_level_up(2); AudioManager.ui_confirm()
+		return
 	if _passive_active:
 		if event.is_action_pressed("menu_slot_1"):   _pick_passive(0); AudioManager.ui_confirm()
 		elif event.is_action_pressed("menu_slot_2"): _pick_passive(1); AudioManager.ui_confirm()
@@ -677,7 +784,8 @@ func _input(event):
 			return
 	if GameManager.state != GameManager.State.PLAYING:
 		if event.is_action_pressed("menu_back"):
-			GameManager.go_to_class_select()
+			GameManager.finish_run(GameManager.state == GameManager.State.ESCAPED)
+			GameManager.go_to_result()
 
 func _class_ability_name() -> String:
 	var rd: Dictionary = GameManager.RACES.get(GameManager.selected_race, {})

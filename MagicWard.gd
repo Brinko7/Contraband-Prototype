@@ -28,7 +28,11 @@ func _process(delta):
 	if player == null or _triggered:
 		return
 	if global_position.distance_to(player.global_position) <= INTERACT_RANGE:
-		_trigger(player)
+		# DISARM_TOOL: destroy ward silently without triggering
+		if GameManager.has_gear_effect("DISARM_TOOL") and not _triggered:
+			destroy_ward()
+		else:
+			_trigger(player)
 
 func _trigger(player):
 	_triggered = true

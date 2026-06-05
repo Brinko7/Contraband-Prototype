@@ -118,6 +118,9 @@ var _hit_cooldown := 0.0
 func _update_chase(delta):
 	if player == null:
 		return
+	if GameManager.selected_race == "WOOD_ELF":
+		alert_state = AlertState.UNAWARE
+		return
 	_hit_cooldown = max(0.0, _hit_cooldown - delta)
 	if global_position.distance_to(player.global_position) <= TILE_SIZE:
 		if _hit_cooldown <= 0.0:
@@ -140,6 +143,9 @@ func _step_toward(target_world: Vector2, interval: float):
 	move_timer = interval
 
 func _on_noise_emitted(level: int, world_position: Vector2):
+	# WOOD_ELF: fey ancestry makes them undetectable by gnoll scent (hound tracking)
+	if GameManager.selected_race == "WOOD_ELF":
+		return
 	var hear_range: float
 	if level == 2:
 		hear_range = HEARING_RANGE_LOUD

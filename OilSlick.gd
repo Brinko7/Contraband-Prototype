@@ -19,6 +19,9 @@ func _on_player_step(player):
 	var sneaking: bool = player.get("is_sneaking") == true
 	if sneaking:
 		return  # Sneaking = careful — no stumble
+	var gm = get_node_or_null("/root/GameManager")
+	if gm and gm.has_passive("SLIPPERY"):
+		return
 	# Apply stumble: lock movement briefly and emit quiet noise
 	var cooldown = player.get("_move_cooldown")
 	if cooldown != null and float(cooldown) < 0.08:

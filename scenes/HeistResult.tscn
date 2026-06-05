@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://hrt_contraband01"]
+
+[ext_resource type="Script" path="res://scenes/HeistResult.gd" id="1_hrt"]
+
+[node name="HeistResult" type="Node2D"]
+script = ExtResource("1_hrt")

@@ -2,6 +2,9 @@ extends Node2D
 
 # Spawned when a guard is taken down. Nearby unaware guards who approach will
 # notice the body and become suspicious — a core stealth-game mechanic.
+#
+# V11: Hotline Miami-style tumble death animation — body flies in kill direction,
+#      spins, leaves blood trail, then settles into final prone pose.
 
 const DETECT_RANGE   = 36.0
 const FADE_DURATION  = 180.0
@@ -17,6 +20,14 @@ var _discovered  := false
 var _age         := 0.0
 var _loot_pulse  := 0.0
 
+# ── Hotline Miami death tumble ────────────────────────────────────────────────
+const _TUMBLE_DUR: float = 0.55
+var _tumble_t:      float   = 0.0   # counts down from TUMBLE_DUR
+var _tumble_dir:    Vector2 = Vector2.ZERO
+var _tumble_spin:   float   = 0.0   # radians/sec
+var _trail:         Array   = []    # blood trail positions (local offsets)
+var _trail_timer:   float   = 0.0
+
 func _ready():
 	add_to_group("bodies")
 	add_to_group("interactable")
@@ -25,8 +36,16 @@ func _ready():
 	if get_meta("no_body", false):
 		queue_free()
 		return
-	if GameManager.has_gear_effect("SET_IRON"):
+	if GameManager.has_set_bonus("SET_IRON"):
 		_set_iron_grace = 6.0
+
+	# Start tumble animation if we have a kill direction
+	if has_meta("kill_dir"):
+		var kd: Vector2 = Vector2(get_meta("kill_dir"))
+		if kd != Vector2.ZERO:
+			_tumble_dir  = kd.normalized()
+			_tumble_t    = _TUMBLE_DUR
+			_tumble_spin = randf_range(9.0, 16.0) * (1.0 if randf() > 0.5 else -1.0)
 
 func is_in_range(player_pos: Vector2) -> bool:
 	return global_position.distance_to(player_pos) <= INTERACT_RANGE
@@ -62,6 +81,24 @@ func interact(player: Node2D):
 
 func _process(delta):
 	_age += delta
+
+	# ── Tumble animation ──────────────────────────────────────────────────────
+	if _tumble_t > 0.0:
+		_tumble_t -= delta
+		# Slide the node's actual position so body lands where it falls
+		if _tumble_dir != Vector2.ZERO:
+			var speed: float = 48.0 * (_tumble_t / _TUMBLE_DUR)  # decelerating
+			position += _tumble_dir * speed * delta
+		# Emit blood trail dots as world-space positions
+		_trail_timer += delta
+		if _trail_timer >= 0.05:
+			_trail_timer = 0.0
+			_trail.append(global_position)   # world pos at this moment
+			if _trail.size() > 12:
+				_trail.pop_front()
+		queue_redraw()
+		return   # skip guard-detection during tumble
+
 	if _set_iron_grace > 0.0:
 		_set_iron_grace -= delta
 		queue_redraw()
@@ -84,6 +121,30 @@ func _draw():
 	var alpha: float = clamp(1.0 - (_age / FADE_DURATION), 0.2, 0.85)
 	var f: Vector2 = body_facing.normalized()
 	var perp: Vector2 = f.rotated(PI * 0.5)
+
+	# ── Blood trail during / after tumble ────────────────────────────────────
+	# Draw world-space trail dots behind where the body slid (baked at emit time)
+	if not _trail.is_empty() and _tumble_dir != Vector2.ZERO:
+		var trail_count: int = _trail.size()
+		for i in range(trail_count):
+			var trail_alpha: float = float(i + 1) / float(trail_count) * 0.55 * alpha
+			# Convert world position to local draw space
+			var tpos: Vector2 = _trail[i] - global_position
+			draw_circle(tpos, 1.8, Color(0.55, 0.06, 0.06, trail_alpha))
+			# Fixed satellite droplets (deterministic offsets)
+			if i % 3 == 0:
+				var side: float = float(i % 2) * 2.0 - 1.0
+				draw_circle(tpos + Vector2(side * 2.5, float(i % 5) - 2.0), 0.9,
+					Color(0.45, 0.04, 0.04, trail_alpha * 0.70))
+
+	# ── Tumble transform: spin rotation during death animation ────────────────
+	# Node position moves during _process; here we just apply spin rotation.
+	var tumbling: bool = _tumble_t > 0.0 and _tumble_dir != Vector2.ZERO
+	if tumbling:
+		var frac: float = clamp(1.0 - (_tumble_t / _TUMBLE_DUR), 0.0, 1.0)
+		var spin_angle: float = _tumble_spin * frac * (PI * 1.5)  # up to 1.5 rotations
+		draw_set_transform(Vector2.ZERO, spin_angle, Vector2.ONE)
+		alpha = clamp(alpha, 0.70, 1.0)  # stay bright during tumble
 
 	# Blood pool — outer dark spread
 	var outer_pool: PackedVector2Array = PackedVector2Array()
@@ -203,3 +264,7 @@ func _draw():
 		var sp: float = pulse * 1.2
 		draw_line(coin_pos + Vector2(0, -3.5 - sp), coin_pos + Vector2(0, -2.0 - sp), Color(1.0, 1.0, 0.70, 0.85), 0.6)
 		draw_line(coin_pos + Vector2(-2.0, -2.5 - sp * 0.5), coin_pos + Vector2(2.0, -2.5 - sp * 0.5), Color(1.0, 1.0, 0.70, 0.6), 0.4)
+
+	# Reset tumble transform at very end so UI indicators aren't offset
+	if tumbling:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)

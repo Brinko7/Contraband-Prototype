@@ -63,7 +63,9 @@ func _draw():
 				in_visited = true
 				break
 		var gs: int = guard.get("alert_state")
-		if not in_visited and gs != 2:
+		# SENTINEL_EYE relic: always show all guards regardless of fog
+		var sentinel_eye := GameManager.has_relic("SENTINEL_EYE")
+		if not in_visited and gs != 2 and not sentinel_eye:
 			continue
 		var gp  := _to_map(guard.global_position)
 		var gc: Color
@@ -95,6 +97,13 @@ func _draw():
 				if inv_visited:
 					var ip := _to_map(inv)
 					draw_circle(ip, 1.2, Color(1.0, 0.9, 0.2, 0.30))
+
+	# ── Alarm Bells ──────────────────────────────────────────────────────────
+	for bell in get_tree().get_nodes_in_group("alarm_bells"):
+		var bp2 := _to_map(bell.global_position)
+		var disabled: bool = bell.get("is_disabled") == true
+		var col: Color = Color(0.30, 0.28, 0.22, 0.45) if disabled else Color(0.92, 0.72, 0.12, 0.75)
+		draw_rect(Rect2(bp2.x - 1.2, bp2.y - 1.5, 2.4, 2.4), col)
 
 	# ── Player ────────────────────────────────────────────────────────────────
 	var player = get_tree().get_first_node_in_group("player")

@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://prh_contraband01"]
+
+[ext_resource type="Script" path="res://scenes/PreHeist.gd" id="1_prh"]
+
+[node name="PreHeist" type="Node2D"]
+script = ExtResource("1_prh")

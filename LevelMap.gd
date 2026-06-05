@@ -24,27 +24,36 @@ var C_WALL_ENTRY_E   := Color(0.44, 0.35, 0.25)
 
 # ── Torch sconce positions (world-pixel centres) ───────────────────────────────
 const TORCHES: Array[Vector2] = [
-	Vector2(256,  20),
-	Vector2(384,  20),
-	Vector2(512,  20),
-	Vector2(144, 132),
-	Vector2(456, 132),
-	Vector2(680, 132),
-	Vector2(160, 308),
-	Vector2(600, 308),
-	Vector2(384, 468),
-	Vector2(256, 556),
-	Vector2(512, 556),
+	# Vault — three across north face
+	Vector2(240,  24),
+	Vector2(384,  24),
+	Vector2(528,  24),
+	# Captain's Office — two: north wall, south-east corner
+	Vector2( 80, 140),
+	Vector2(216, 270),
+	# Antechamber — one center north
+	Vector2(408, 140),
+	# Armory — two: north, east wall
+	Vector2(636, 140),
+	Vector2(700, 252),
+	# Barracks — north-west and south-center
+	Vector2( 72, 316),
+	Vector2(216, 442),
+	# Storeroom — north-east
+	Vector2(660, 316),
+	# Entry Foyer — flanking center
+	Vector2(300, 494),
+	Vector2(468, 494),
 ]
 
 const ROOM_TILE_RECTS: Array[Rect2i] = [
-	Rect2i(14, 29, 20,  6),
-	Rect2i( 1, 19, 18,  9),
-	Rect2i(29, 19, 17,  9),
-	Rect2i( 1,  8, 16,  9),
-	Rect2i(20,  8, 17,  9),
-	Rect2i( 8,  1, 32,  6),
-	Rect2i(39,  8,  7,  9),
+	Rect2i(11, 30, 26,  5),   # Entry Foyer
+	Rect2i( 1, 19, 19, 10),   # Barracks
+	Rect2i(27, 19, 19, 10),   # Storeroom
+	Rect2i( 1,  8, 16, 10),   # Captain's Office
+	Rect2i(19,  8, 13, 10),   # Antechamber
+	Rect2i( 6,  1, 36,  6),   # The Vault
+	Rect2i(35,  8, 11, 10),   # Armory
 ]
 
 var map: Array = []
@@ -90,21 +99,34 @@ func _build_map():
 			row.append(WALL)
 		map.append(row)
 
-	_carve(Rect2i( 8,  1, 32,  6))
-	_carve(Rect2i( 8,  6,  2,  3))
-	_carve(Rect2i(26,  6,  2,  3))
-	_carve(Rect2i( 1,  8, 16,  9))
-	_carve(Rect2i(20,  8, 17,  9))
-	_carve(Rect2i(39,  8,  7,  9))
-	_carve(Rect2i(17, 11,  3,  3))
-	_carve(Rect2i(37, 11,  2,  3))
-	_carve(Rect2i( 8, 17,  2,  2))
-	_carve(Rect2i(35, 17,  2,  2))
-	_carve(Rect2i( 1, 19, 18,  9))
-	_carve(Rect2i(29, 19, 17,  9))
-	_carve(Rect2i(15, 27,  2,  2))
-	_carve(Rect2i(31, 27,  2,  2))
-	_carve(Rect2i(14, 29, 20,  6))
+	# ── Vault (top, grand & wide) ────────────────────────────────────────────
+	_carve(Rect2i( 6,  1, 36,  6))   # The Vault: cols 6-41, rows 1-6
+	_carve(Rect2i( 8,  6,  3,  3))   # Vault-West corridor (3-wide)
+	_carve(Rect2i(25,  6,  3,  3))   # Vault-East corridor (3-wide)
+
+	# ── Upper tier ───────────────────────────────────────────────────────────
+	_carve(Rect2i( 1,  8, 16, 10))   # Captain's Office: cols 1-16, rows 8-17
+	_carve(Rect2i(19,  8, 13, 10))   # Antechamber: cols 19-31, rows 8-17
+	_carve(Rect2i(35,  8, 11, 10))   # Armory: cols 35-45, rows 8-17
+
+	# ── Upper corridors (all 3-4 tiles wide, furniture-proof) ────────────────
+	_carve(Rect2i(16, 10,  4,  6))   # Office → Antechamber (4-wide)
+	_carve(Rect2i(31, 10,  5,  6))   # Antechamber → Armory (5-wide)
+
+	# ── Vertical passages to lower tier (3-wide) ─────────────────────────────
+	_carve(Rect2i( 7, 17,  3,  3))   # Office → Barracks
+	_carve(Rect2i(36, 17,  3,  3))   # Armory → Storeroom
+
+	# ── Lower tier ───────────────────────────────────────────────────────────
+	_carve(Rect2i( 1, 19, 19, 10))   # Barracks: cols 1-19, rows 19-28
+	_carve(Rect2i(27, 19, 19, 10))   # Storeroom: cols 27-45, rows 19-28
+
+	# ── Vertical corridors to Entry Foyer (3-wide) ───────────────────────────
+	_carve(Rect2i(14, 28,  3,  3))   # Barracks → Entry
+	_carve(Rect2i(31, 28,  3,  3))   # Storeroom → Entry
+
+	# ── Entry Foyer (bottom, wide & grand) ───────────────────────────────────
+	_carve(Rect2i(11, 30, 26,  5))   # Entry Foyer: cols 11-36, rows 30-34
 
 func _carve(rect: Rect2i):
 	for r in range(rect.position.y, rect.position.y + rect.size.y):
@@ -116,33 +138,39 @@ func _randomize_cover():
 	var rng := RandomNumberGenerator.new()
 	rng.seed = GameManager.run_seed + GameManager.current_floor * 31337
 
-	var vpillars := [Vector2i(13, 3), Vector2i(21, 4), Vector2i(29, 3), Vector2i(37, 4)]
+	# Vault — decorative corner alcoves, clear of vault corridors (cols 8-10, 25-27)
+	var vpillars := [Vector2i(14, 2), Vector2i(18, 3), Vector2i(32, 2), Vector2i(36, 3)]
 	for p in vpillars:
 		if rng.randi_range(0, 2) != 0:
 			if p.y > 0 and p.y < MAP_ROWS - 1 and p.x > 0 and p.x < MAP_COLS - 1:
 				map[p.y][p.x] = WALL
 
-	var capillars := [Vector2i(4, 10), Vector2i(11, 13)]
+	# Captain's Office — clear of north corridor (cols 7-9) and east passage (col 16+)
+	var capillars := [Vector2i(3, 10), Vector2i(10, 14)]
 	for p in capillars:
 		if rng.randi_range(0, 2) != 0:
 			_place_pillar(p.x, p.y)
 
-	var antipillars := [Vector2i(22, 10), Vector2i(30, 13)]
+	# Antechamber — clear of corridors on west (cols 16-19) and east (cols 31-35)
+	var antipillars := [Vector2i(21, 14), Vector2i(28, 14)]
 	for p in antipillars:
 		if rng.randi_range(0, 2) != 0:
 			_place_pillar(p.x, p.y)
 
-	var bpillars := [Vector2i(3, 21), Vector2i(10, 24), Vector2i(15, 21)]
+	# Barracks — clear of north passage (cols 7-9) and south corridor (cols 14-16)
+	var bpillars := [Vector2i(2, 22), Vector2i(9, 25), Vector2i(16, 22)]
 	for p in bpillars:
 		if rng.randi_range(0, 2) != 0:
 			_place_pillar(p.x, p.y)
 
-	var spillars := [Vector2i(31, 21), Vector2i(38, 24), Vector2i(43, 21)]
+	# Storeroom — clear of north passage (cols 36-38) and south corridor (cols 31-33)
+	var spillars := [Vector2i(29, 22), Vector2i(40, 25), Vector2i(43, 22)]
 	for p in spillars:
 		if rng.randi_range(0, 2) != 0:
 			_place_pillar(p.x, p.y)
 
-	var epillars := [Vector2i(17, 31), Vector2i(25, 31)]
+	# Entry Foyer — clear of north corridors (cols 14-16 and 31-33)
+	var epillars := [Vector2i(18, 31), Vector2i(28, 31)]
 	for p in epillars:
 		if rng.randi_range(0, 2) != 0:
 			_place_pillar(p.x, p.y)
@@ -191,44 +219,44 @@ func _update_fog():
 		visited_rooms[idx] = true
 
 func _tile_to_room(tc: Vector2i) -> int:
-	if tc.y >= 29 and tc.y <= 34 and tc.x >= 14 and tc.x <= 33: return 0
-	if tc.y >= 19 and tc.y <= 27 and tc.x >=  1 and tc.x <= 18: return 1
-	if tc.y >= 19 and tc.y <= 27 and tc.x >= 29 and tc.x <= 45: return 2
-	if tc.y >=  8 and tc.y <= 16 and tc.x >=  1 and tc.x <= 16: return 3
-	if tc.y >=  8 and tc.y <= 16 and tc.x >= 20 and tc.x <= 36: return 4
-	if tc.y >=  1 and tc.y <=  6 and tc.x >=  8 and tc.x <= 39: return 5
-	if tc.y >=  8 and tc.y <= 16 and tc.x >= 39 and tc.x <= 45: return 6
+	if tc.y >= 30 and tc.y <= 34 and tc.x >= 11 and tc.x <= 36: return 0  # Entry Foyer
+	if tc.y >= 19 and tc.y <= 28 and tc.x >=  1 and tc.x <= 19: return 1  # Barracks
+	if tc.y >= 19 and tc.y <= 28 and tc.x >= 27 and tc.x <= 45: return 2  # Storeroom
+	if tc.y >=  8 and tc.y <= 17 and tc.x >=  1 and tc.x <= 16: return 3  # Captain's Office
+	if tc.y >=  8 and tc.y <= 17 and tc.x >= 19 and tc.x <= 31: return 4  # Antechamber
+	if tc.y >=  1 and tc.y <=  6 and tc.x >=  6 and tc.x <= 41: return 5  # The Vault
+	if tc.y >=  8 and tc.y <= 17 and tc.x >= 35 and tc.x <= 45: return 6  # Armory
 	return -1
 
 # ── Zone helpers ──────────────────────────────────────────────────────────────
 func _get_zone(row: int) -> int:
 	if row <=  7: return 0
-	if row <= 28: return 1
+	if row <= 29: return 1
 	return 2
 
 func _apply_floor_theme():
 	match GameManager.current_floor:
-		1:
-			C_FLOOR_VAULT_A  = Color(0.14, 0.11, 0.07); C_FLOOR_VAULT_B  = Color(0.16, 0.13, 0.09)
-			C_FLOOR_MID_A    = Color(0.12, 0.10, 0.07); C_FLOOR_MID_B    = Color(0.14, 0.12, 0.08)
-			C_FLOOR_ENTRY_A  = Color(0.16, 0.12, 0.08); C_FLOOR_ENTRY_B  = Color(0.19, 0.14, 0.09)
-			C_WALL_VAULT     = Color(0.42, 0.30, 0.18); C_WALL_VAULT_E   = Color(0.62, 0.46, 0.28)
-			C_WALL_MID       = Color(0.36, 0.28, 0.18); C_WALL_MID_E     = Color(0.54, 0.40, 0.26)
-			C_WALL_ENTRY     = Color(0.38, 0.28, 0.18); C_WALL_ENTRY_E   = Color(0.56, 0.42, 0.26)
-		2:
-			C_FLOOR_VAULT_A  = Color(0.08, 0.07, 0.13); C_FLOOR_VAULT_B  = Color(0.10, 0.09, 0.16)
-			C_FLOOR_MID_A    = Color(0.08, 0.10, 0.08); C_FLOOR_MID_B    = Color(0.10, 0.12, 0.09)
-			C_FLOOR_ENTRY_A  = Color(0.11, 0.09, 0.07); C_FLOOR_ENTRY_B  = Color(0.13, 0.11, 0.08)
-			C_WALL_VAULT     = Color(0.18, 0.14, 0.28); C_WALL_VAULT_E   = Color(0.32, 0.24, 0.48)
-			C_WALL_MID       = Color(0.20, 0.18, 0.14); C_WALL_MID_E     = Color(0.36, 0.30, 0.22)
-			C_WALL_ENTRY     = Color(0.28, 0.22, 0.16); C_WALL_ENTRY_E   = Color(0.44, 0.34, 0.24)
-		_:
-			C_FLOOR_VAULT_A  = Color(0.05, 0.06, 0.10); C_FLOOR_VAULT_B  = Color(0.07, 0.08, 0.13)
-			C_FLOOR_MID_A    = Color(0.07, 0.08, 0.08); C_FLOOR_MID_B    = Color(0.08, 0.09, 0.10)
-			C_FLOOR_ENTRY_A  = Color(0.08, 0.08, 0.09); C_FLOOR_ENTRY_B  = Color(0.10, 0.10, 0.11)
-			C_WALL_VAULT     = Color(0.14, 0.16, 0.28); C_WALL_VAULT_E   = Color(0.24, 0.28, 0.46)
-			C_WALL_MID       = Color(0.16, 0.18, 0.22); C_WALL_MID_E     = Color(0.26, 0.30, 0.38)
-			C_WALL_ENTRY     = Color(0.18, 0.18, 0.22); C_WALL_ENTRY_E   = Color(0.28, 0.28, 0.36)
+		1:  # Warm sandstone cellar
+			C_FLOOR_VAULT_A  = Color(0.10, 0.08, 0.05); C_FLOOR_VAULT_B  = Color(0.12, 0.10, 0.06)
+			C_FLOOR_MID_A    = Color(0.09, 0.07, 0.05); C_FLOOR_MID_B    = Color(0.11, 0.09, 0.06)
+			C_FLOOR_ENTRY_A  = Color(0.10, 0.08, 0.05); C_FLOOR_ENTRY_B  = Color(0.12, 0.10, 0.06)
+			C_WALL_VAULT     = Color(0.72, 0.58, 0.38); C_WALL_VAULT_E   = Color(0.88, 0.72, 0.50)
+			C_WALL_MID       = Color(0.62, 0.50, 0.34); C_WALL_MID_E     = Color(0.78, 0.62, 0.44)
+			C_WALL_ENTRY     = Color(0.65, 0.52, 0.35); C_WALL_ENTRY_E   = Color(0.82, 0.66, 0.46)
+		2:  # Dark slate dungeon
+			C_FLOOR_VAULT_A  = Color(0.07, 0.06, 0.10); C_FLOOR_VAULT_B  = Color(0.09, 0.08, 0.13)
+			C_FLOOR_MID_A    = Color(0.07, 0.08, 0.07); C_FLOOR_MID_B    = Color(0.09, 0.10, 0.08)
+			C_FLOOR_ENTRY_A  = Color(0.08, 0.07, 0.06); C_FLOOR_ENTRY_B  = Color(0.10, 0.09, 0.07)
+			C_WALL_VAULT     = Color(0.42, 0.38, 0.62); C_WALL_VAULT_E   = Color(0.58, 0.52, 0.82)
+			C_WALL_MID       = Color(0.50, 0.46, 0.40); C_WALL_MID_E     = Color(0.68, 0.62, 0.54)
+			C_WALL_ENTRY     = Color(0.55, 0.48, 0.38); C_WALL_ENTRY_E   = Color(0.72, 0.62, 0.50)
+		_:  # Deep obsidian fortress
+			C_FLOOR_VAULT_A  = Color(0.05, 0.05, 0.08); C_FLOOR_VAULT_B  = Color(0.07, 0.07, 0.11)
+			C_FLOOR_MID_A    = Color(0.06, 0.06, 0.07); C_FLOOR_MID_B    = Color(0.08, 0.08, 0.09)
+			C_FLOOR_ENTRY_A  = Color(0.06, 0.06, 0.07); C_FLOOR_ENTRY_B  = Color(0.08, 0.08, 0.09)
+			C_WALL_VAULT     = Color(0.38, 0.42, 0.72); C_WALL_VAULT_E   = Color(0.52, 0.58, 0.90)
+			C_WALL_MID       = Color(0.40, 0.42, 0.52); C_WALL_MID_E     = Color(0.56, 0.58, 0.72)
+			C_WALL_ENTRY     = Color(0.42, 0.42, 0.50); C_WALL_ENTRY_E   = Color(0.58, 0.58, 0.68)
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 func _draw():
@@ -306,76 +334,93 @@ func _draw():
 	draw_rect(Rect2(0, vault_y - 3, map_w, 3), Color(0.22, 0.10, 0.35, 0.22))
 	var bar_y: float = 19 * TILE_SIZE
 	draw_rect(Rect2(0, bar_y - 3, map_w, 3), Color(0.10, 0.25, 0.12, 0.22))
-	var entry_y: float = 29 * TILE_SIZE
+	var entry_y: float = 30 * TILE_SIZE
 	draw_rect(Rect2(0, entry_y - 3, map_w, 3), Color(0.15, 0.15, 0.25, 0.22))
 
-# ── Floor tile (textured, themed) ─────────────────────────────────────────────
+# ── Iso ellipse helper (returns polygon points for elliptical fills) ─────────
+func _iso_ellipse_pts(center: Vector2, rx: float, ry: float, segments: int = 16) -> PackedVector2Array:
+	var pts: PackedVector2Array = PackedVector2Array()
+	for i in range(segments):
+		var a: float = TAU * float(i) / float(segments)
+		pts.append(Vector2(center.x + cos(a) * rx, center.y + sin(a) * ry))
+	return pts
+
+# ── Floor tile (Hades-style deep charcoal stone) ──────────────────────────────
 func _draw_floor_tile(x: float, y: float, c: int, r: int, zone: int, floor_id: int):
-	var alt: bool = (r + c) % 4 == 0
-	var fa: Color; var fb: Color
+	var tile_hash: int = (r * 47 + c * 31) % 100
+	# Deep charcoal base, with subtle zone tint mixed in
+	var zone_tint: Color
 	match zone:
-		0: fa = C_FLOOR_VAULT_A;  fb = C_FLOOR_VAULT_B
-		1: fa = C_FLOOR_MID_A;    fb = C_FLOOR_MID_B
-		_: fa = C_FLOOR_ENTRY_A;  fb = C_FLOOR_ENTRY_B
-	var base: Color = fb if alt else fa
-	var tile_hash: int = (c * 31 + r * 17) % 100
-	# Subtle per-tile shade variation
-	var vshade: float = (tile_hash % 7) * 0.004
-	base = Color(base.r + vshade, base.g + vshade, base.b + vshade)
+		0: zone_tint = Color(0.04, 0.02, 0.06)   # vault — faintly purple
+		1: zone_tint = Color(0.02, 0.03, 0.02)   # mid — faintly green
+		_: zone_tint = Color(0.04, 0.03, 0.02)   # entry — faintly warm
+	var base: Color = Color(0.10 + zone_tint.r, 0.09 + zone_tint.g, 0.11 + zone_tint.b)
+	# Per-tile deterministic shade variation
+	var vshade: float = float(tile_hash % 11) * 0.006 - 0.02
+	base = Color(
+		clamp(base.r + vshade, 0.04, 0.30),
+		clamp(base.g + vshade, 0.04, 0.30),
+		clamp(base.b + vshade + float(tile_hash % 5) * 0.002, 0.04, 0.32)
+	)
 
 	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), base)
 
-	# Bottom & right "edge depth" — 1px darker stripes
-	var edge: Color = Color(0, 0, 0, 0.30)
-	draw_rect(Rect2(x, y + TILE_SIZE - 1, TILE_SIZE, 1), edge)
-	draw_rect(Rect2(x + TILE_SIZE - 1, y, 1, TILE_SIZE), edge)
-	# Top-left subtle highlight
-	draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1, 1, 1, 0.04))
+	# Tile seam lines — 1px darker on right + bottom edge (cuts deep)
+	var seam: Color = Color(0, 0, 0, 0.55)
+	draw_rect(Rect2(x, y + TILE_SIZE - 1, TILE_SIZE, 1), seam)
+	draw_rect(Rect2(x + TILE_SIZE - 1, y, 1, TILE_SIZE), seam)
+	# Top-left faint highlight (catch-light edge)
+	draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1, 1, 1, 0.035))
+	draw_rect(Rect2(x, y, 1, TILE_SIZE), Color(1, 1, 1, 0.025))
 
+	# Occasional subtle crack polygon
+	if tile_hash % 20 == 0:
+		var cx: float = x + 3.0 + float(tile_hash % 8)
+		var cy: float = y + 4.0 + float((tile_hash / 7) % 7)
+		var cdir: Vector2 = Vector2(1.0, 0.3).rotated(float(tile_hash) * 0.11)
+		var clen: float = 4.0 + float(tile_hash % 5)
+		draw_line(Vector2(cx, cy),
+			Vector2(cx + cdir.x * clen, cy + cdir.y * clen),
+			Color(0, 0, 0, 0.45), 0.7)
+		# Fork
+		if tile_hash % 40 == 0:
+			var cdir2: Vector2 = cdir.rotated(0.6)
+			draw_line(Vector2(cx + cdir.x * clen * 0.5, cy + cdir.y * clen * 0.5),
+				Vector2(cx + cdir.x * clen * 0.5 + cdir2.x * 2.5,
+						cy + cdir.y * clen * 0.5 + cdir2.y * 2.5),
+				Color(0, 0, 0, 0.38), 0.5)
+
+	# Tiny grain speck
+	if tile_hash % 13 == 5:
+		draw_rect(Rect2(x + 4 + float(tile_hash % 7), y + 3 + float(tile_hash % 9), 1, 1),
+			Color(0, 0, 0, 0.25))
+
+	# Theme-specific subtle accents
 	match floor_id:
 		1:
-			# Sandstone — occasional cracks
-			if tile_hash % 11 == 0:
-				var cx: float = x + 3.0 + float(tile_hash % 6)
-				var cy: float = y + 4.0 + float((tile_hash / 7) % 6)
-				var cdir: Vector2 = Vector2(1.0, 0.4).rotated(float(tile_hash) * 0.13)
-				var clen: float = 3.0 + float(tile_hash % 4)
-				draw_line(Vector2(cx, cy), Vector2(cx + cdir.x * clen, cy + cdir.y * clen),
-					Color(0, 0, 0, 0.32), 0.6)
-			# Occasional sand grain dots
 			if tile_hash % 17 == 3:
 				draw_circle(Vector2(x + 5 + float(tile_hash % 6), y + 9 + float(tile_hash % 5)),
-					0.6, Color(0.85, 0.70, 0.45, 0.18))
-		2:
-			# Barracks — mortar grid lines forming 8px joints
-			var mortar: Color = Color(base.r * 0.72, base.g * 0.72, base.b * 0.75, 0.55)
-			draw_line(Vector2(x, y + 8), Vector2(x + TILE_SIZE, y + 8), mortar, 0.6)
-			if c % 2 == 0:
-				draw_line(Vector2(x + 8, y), Vector2(x + 8, y + 8), mortar, 0.6)
-			else:
-				draw_line(Vector2(x + 4, y + 8), Vector2(x + 4, y + TILE_SIZE), mortar, 0.6)
-				draw_line(Vector2(x + 12, y + 8), Vector2(x + 12, y + TILE_SIZE), mortar, 0.6)
-			# Occasional bootscuff
-			if tile_hash % 23 == 4:
-				draw_line(Vector2(x + 3, y + 12), Vector2(x + 9, y + 11),
-					Color(0, 0, 0, 0.22), 0.6)
+					0.6, Color(0.85, 0.70, 0.45, 0.16))
 		_:
-			# Vault — dark stone with occasional arcane crack-glow
-			var mortar2: Color = Color(base.r * 0.60, base.g * 0.60, base.b * 0.72, 0.50)
-			if (r + c) % 3 == 0:
-				draw_line(Vector2(x, y + 8), Vector2(x + TILE_SIZE, y + 8), mortar2, 0.5)
-			if tile_hash % 13 == 1:
-				var glowp: float = 0.20 + sin(_t * 1.7 + float(tile_hash) * 0.3) * 0.12
-				var gx: float = x + 4.0 + float(tile_hash % 6)
-				var gy: float = y + 6.0 + float((tile_hash / 5) % 6)
-				var gd: Vector2 = Vector2(1.0, 0.3).rotated(float(tile_hash) * 0.21)
-				var glen: float = 4.0 + float(tile_hash % 3)
-				draw_line(Vector2(gx, gy), Vector2(gx + gd.x * glen, gy + gd.y * glen),
-					Color(0.45, 0.35, 0.85, glowp), 0.7)
-				draw_line(Vector2(gx, gy), Vector2(gx + gd.x * glen, gy + gd.y * glen),
-					Color(0.80, 0.65, 1.00, glowp * 0.5), 0.3)
+			# Arcane glimmer in dark mode
+			if tile_hash % 23 == 1:
+				var glowp: float = 0.14 + sin(_t * 1.7 + float(tile_hash) * 0.3) * 0.08
+				draw_circle(Vector2(x + 6 + float(tile_hash % 5), y + 8 + float(tile_hash % 4)),
+					0.7, Color(0.55, 0.40, 0.95, glowp))
 
-# ── Wall tile (3/4 perspective stone block) ───────────────────────────────────
+	# Warm overlay for tiles near a torch
+	var tcx: float = x + TILE_SIZE * 0.5
+	var tcy: float = y + TILE_SIZE * 0.5
+	for tp: Vector2 in TORCHES:
+		var d2: float = (tp.x - tcx) * (tp.x - tcx) + (tp.y - tcy) * (tp.y - tcy)
+		if d2 < 3600.0:  # within 60px
+			var falloff: float = 1.0 - sqrt(d2) / 60.0
+			falloff = clamp(falloff, 0.0, 1.0)
+			var warm_a: float = falloff * falloff * 0.22
+			draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE),
+				Color(1.0, 0.72, 0.25, warm_a))
+
+# ── Wall tile (Hades-style tall imposing stone block) ─────────────────────────
 func _draw_wall_tile(x: float, y: float, c: int, r: int, zone: int, floor_id: int, has_floor_south: bool, has_floor_north: bool):
 	var cw: Color; var ce: Color
 	match zone:
@@ -385,60 +430,104 @@ func _draw_wall_tile(x: float, y: float, c: int, r: int, zone: int, floor_id: in
 
 	var tile_hash: int = (c * 31 + r * 17) % 100
 	var v: float = float(tile_hash % 6) * 0.012
-	var front_col: Color = Color(cw.r - v, cw.g - v * 0.5, cw.b - v * 0.3)
-	var top_col: Color = ce
-	var top_h: float = 5.0
-	var front_h: float = float(TILE_SIZE) - top_h
-	var shadow_col: Color = Color(front_col.r * 0.45, front_col.g * 0.45, front_col.b * 0.55)
-	var hi_col: Color = front_col.lightened(0.10)
 
-	# Top face (slightly tilted look with subtle gradient)
-	draw_rect(Rect2(x, y, TILE_SIZE, top_h), top_col)
-	# Top face bevel highlight
-	draw_rect(Rect2(x, y, TILE_SIZE, 1), top_col.lightened(0.18))
-	# Top-face stone texture noise
+	# Hades palette: bright stone front, very dark floor — extreme contrast
+	var front_col: Color = Color(
+		clamp(cw.r - v * 0.5, 0.05, 1.0),
+		clamp(cw.g - v * 0.3, 0.05, 1.0),
+		clamp(cw.b - v * 0.2, 0.05, 1.0)
+	)
+	var top_col: Color = Color(
+		clamp(ce.r + 0.10, 0.0, 1.0),
+		clamp(ce.g + 0.10, 0.0, 1.0),
+		clamp(ce.b + 0.12, 0.0, 1.0)
+	)
+	var shadow_col: Color = Color(front_col.r * 0.20, front_col.g * 0.18, front_col.b * 0.22)
+	var hi_col: Color = front_col.lightened(0.22)
+
+	var top_h: float = 4.0
+	# Tall front face — wall feels like you can't see over it
+	var front_h: float = 48.0 if has_floor_south else float(TILE_SIZE)
+
+	# TOP face — tile footprint, drawn at y (lighter, suggests looking down at the top of the block)
+	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), top_col)
+	# Subtle top highlight strip
+	draw_rect(Rect2(x, y, TILE_SIZE, 1), top_col.lightened(0.22))
+	# Stone speckles on top face
 	if tile_hash % 5 == 0:
-		draw_rect(Rect2(x + 3, y + 1, 3, 1), top_col.darkened(0.15))
+		draw_rect(Rect2(x + 3, y + 2, 3, 1), top_col.darkened(0.15))
 	if tile_hash % 7 == 2:
-		draw_rect(Rect2(x + 9, y + 2, 4, 1), top_col.darkened(0.12))
+		draw_rect(Rect2(x + 9, y + 4, 4, 1), top_col.darkened(0.12))
 
-	# Front face
-	draw_rect(Rect2(x, y + top_h, TILE_SIZE, front_h), front_col)
+	# FRONT face — extends downward into the floor tile space below, giving wall depth
+	# This is the classic 2.5D trick: wall face drawn over the floor tile to the south
+	if has_floor_south:
+		var fy: float = y + float(TILE_SIZE)
+		draw_rect(Rect2(x, fy, TILE_SIZE, front_h), front_col)
 
-	# Block separation — vertical mortar joint (only on some tiles)
-	if c % 2 == int(r / 2) % 2:
-		draw_line(Vector2(x + 8, y + top_h), Vector2(x + 8, y + TILE_SIZE),
-			Color(0, 0, 0, 0.35), 0.7)
-	# Horizontal mortar line at base of top face
-	draw_line(Vector2(x, y + top_h), Vector2(x + TILE_SIZE, y + top_h),
-		shadow_col, 0.9)
-	# Faint mid-block mortar
-	draw_line(Vector2(x, y + top_h + front_h * 0.5),
-		Vector2(x + TILE_SIZE, y + top_h + front_h * 0.5),
-		Color(0, 0, 0, 0.18), 0.6)
+		# Top of front face — brighter seam where top meets front (light hits the corner)
+		draw_rect(Rect2(x, fy, TILE_SIZE, 2), front_col.lightened(0.10))
+		# Bottom of front face — darkens as it falls into shadow
+		draw_rect(Rect2(x, fy + front_h - 4, TILE_SIZE, 4), front_col.darkened(0.22))
 
-	# Left shadow strip
-	draw_rect(Rect2(x, y + top_h, 2, front_h), Color(shadow_col.r, shadow_col.g, shadow_col.b, 0.80))
-	# Right highlight
-	draw_rect(Rect2(x + TILE_SIZE - 1, y + top_h, 1, front_h), hi_col)
+		# Horizontal mortar joints
+		var joint_col: Color = Color(0, 0, 0, 0.42)
+		var jy: float = fy + 16.0
+		while jy < fy + front_h - 2:
+			draw_line(Vector2(x, jy), Vector2(x + TILE_SIZE, jy), joint_col, 0.8)
+			draw_line(Vector2(x, jy + 1), Vector2(x + TILE_SIZE, jy + 1), Color(1, 1, 1, 0.04), 0.5)
+			jy += 16.0
 
-	# Stone block detail — small chipped corners on some tiles
-	if tile_hash % 9 == 3:
-		draw_rect(Rect2(x + 2, y + TILE_SIZE - 3, 2, 2), front_col.darkened(0.25))
-	if tile_hash % 11 == 5:
-		draw_rect(Rect2(x + TILE_SIZE - 4, y + top_h + 2, 2, 1), front_col.darkened(0.18))
+		# Vertical mortar joint (stagger by block row for brick offset)
+		var block_row: int = int(fy / 16.0)
+		if (c + block_row) % 2 == 0:
+			draw_line(Vector2(x + 8, fy), Vector2(x + 8, fy + front_h), Color(0, 0, 0, 0.32), 0.7)
 
-	# Theme-specific accents
+		# Dark seam at top of front face (top/front edge)
+		draw_line(Vector2(x, fy), Vector2(x + TILE_SIZE, fy), Color(0, 0, 0, 0.70), 1.2)
+
+		# Left shadow strip (wall is darker on left — ambient occlusion)
+		draw_rect(Rect2(x, fy, 2, front_h),
+			Color(shadow_col.r * 0.6, shadow_col.g * 0.6, shadow_col.b * 0.7, 0.80))
+		# Right highlight strip
+		draw_rect(Rect2(x + TILE_SIZE - 1, fy, 1, front_h), hi_col)
+
+		# Stone chip details
+		if tile_hash % 9 == 3:
+			draw_rect(Rect2(x + 3, fy + 6, 2, 2), front_col.darkened(0.28))
+		if tile_hash % 11 == 5:
+			draw_rect(Rect2(x + TILE_SIZE - 5, fy + 14, 2, 1), front_col.darkened(0.18))
+		if tile_hash % 17 == 9 and front_h > 24:
+			draw_rect(Rect2(x + 7, fy + 28, 3, 1), front_col.darkened(0.22))
+
+		# Drop shadow on floor just below the wall face
+		draw_rect(Rect2(x, fy + front_h, TILE_SIZE, 5),
+			Color(0, 0, 0, 0.50))
+		draw_rect(Rect2(x, fy + front_h + 5, TILE_SIZE, 4),
+			Color(0, 0, 0, 0.25))
+
+		# Warm torch glow on front face
+		var wcx: float = x + TILE_SIZE * 0.5
+		var wcy: float = fy
+		for tp: Vector2 in TORCHES:
+			var d2: float = (tp.x - wcx) * (tp.x - wcx) + (tp.y - wcy) * (tp.y - wcy)
+			if d2 < 4900.0:
+				var falloff: float = 1.0 - sqrt(d2) / 70.0
+				falloff = clamp(falloff, 0.0, 1.0)
+				var warm_a: float = falloff * falloff * 0.30
+				draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), Color(1.0, 0.72, 0.25, warm_a * 0.7))
+				draw_rect(Rect2(x, fy, TILE_SIZE, 8), Color(1.0, 0.68, 0.22, warm_a * 0.55))
+
+	# Theme accents
 	match floor_id:
 		1:
-			# Sandstone — warm tint on top
-			draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1.0, 0.78, 0.40, 0.18))
+			draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1.0, 0.78, 0.40, 0.20))
 		3:
-			# Vault — arcane purple flecks
 			if tile_hash % 13 == 7:
-				var ap: float = 0.20 + sin(_t * 1.5 + float(tile_hash)) * 0.10
-				draw_circle(Vector2(x + 6 + float(tile_hash % 5), y + top_h + 4 + float(tile_hash % 4)),
-					0.6, Color(0.55, 0.40, 0.90, ap))
+				var ap: float = 0.22 + sin(_t * 1.5 + float(tile_hash)) * 0.10
+				draw_circle(Vector2(x + 6 + float(tile_hash % 5),
+					y + float(TILE_SIZE) + 6 + float(tile_hash % 8)),
+					0.7, Color(0.55, 0.40, 0.90, ap))
 
 # ── Torch flame (multi-layer animated) ────────────────────────────────────────
 func _draw_torch_flame(tp: Vector2, i: int):
@@ -497,8 +586,21 @@ func _draw_torch_flame(tp: Vector2, i: int):
 	draw_circle(Vector2(flame_pos.x + sin(_t * 0.7 + i) * 1.5, smoke_y - 3.0),
 		1.0, Color(0.30, 0.30, 0.32, 0.08))
 
-	# Floor light pool
-	draw_circle(Vector2(tp.x, tp.y + 10), 11.0, Color(1.0, 0.62, 0.18, 0.08))
+	# Large floor light pool (iso ellipse — wider than tall to match floor plane)
+	var pool_pulse: float = sin(_t * 4.1 + i * 1.3) * 0.05
+	draw_colored_polygon(
+		_iso_ellipse_pts(Vector2(tp.x, tp.y + 14), 34.0 + pool_pulse * 2.0, 16.0, 20),
+		Color(1.0, 0.72, 0.25, 0.10))
+	draw_colored_polygon(
+		_iso_ellipse_pts(Vector2(tp.x, tp.y + 14), 22.0 + pool_pulse * 1.5, 10.0, 18),
+		Color(1.0, 0.68, 0.22, 0.13))
+	draw_colored_polygon(
+		_iso_ellipse_pts(Vector2(tp.x, tp.y + 12), 12.0, 6.0, 16),
+		Color(1.0, 0.85, 0.40, 0.18))
+
+	# Flickering halo around flame (radius pulses)
+	var halo_r: float = 9.0 + sin(_t * 7.3 + i) * 1.2
+	draw_circle(flame_pos, halo_r, Color(1.0, 0.55, 0.10, 0.10))
 
 # ── Furniture collision ───────────────────────────────────────────────────────
 func _build_furniture_collision():
@@ -506,7 +608,7 @@ func _build_furniture_collision():
 	body.name = "Furniture"
 	add_child(body)
 
-	var _add := func(rect: Rect2):
+	var _add: Callable = func(rect: Rect2):
 		var shape := CollisionShape2D.new()
 		var rs    := RectangleShape2D.new()
 		rs.size        = rect.size
@@ -514,16 +616,41 @@ func _build_furniture_collision():
 		shape.position = rect.get_center()
 		body.add_child(shape)
 
-	_add.call(Rect2(280, 472, 20, 24))
-	_add.call(Rect2(444, 472, 20, 24))
-	for bx: float in [32.0, 80.0, 128.0, 176.0, 240.0]:
-		_add.call(Rect2(bx, 316, 24, 14))
-	_add.call(Rect2(20, 340, 12, 48))
-	for cx: float in [480.0, 544.0, 608.0, 672.0]:
-		_add.call(Rect2(cx, 340, 24, 24))
-	_add.call(Rect2(80, 200, 32, 16))
-	_add.call(Rect2(636, 148, 12, 48))
-	_add.call(Rect2(636, 220, 12, 48))
+	# Entry Foyer — guard booths
+	_add.call(Rect2(196, 490, 20, 26))
+	_add.call(Rect2(556, 490, 20, 26))
+
+	# Barracks — beds (5), rack, tables
+	for bx: float in [16.0, 48.0, 80.0, 168.0, 200.0]:
+		_add.call(Rect2(bx, 308, 26, 22))
+	_add.call(Rect2(16, 354, 12, 48))     # weapon rack against west wall
+	_add.call(Rect2(48, 406, 148, 16))    # dining tables (merged)
+
+	# Storeroom — crate rows
+	for cx: float in [436.0, 464.0, 492.0, 516.0, 648.0, 676.0, 700.0]:
+		_add.call(Rect2(cx, 324, 24, 24))
+	for cx: float in [436.0, 464.0, 552.0, 660.0, 688.0]:
+		_add.call(Rect2(cx, 362, 24, 24))
+	for cx: float in [436.0, 576.0, 604.0, 648.0, 676.0]:
+		_add.call(Rect2(cx, 400, 24, 24))
+
+	# Captain's Office — desk, bookcase, side table
+	_add.call(Rect2(192, 134, 48, 18))    # command desk
+	_add.call(Rect2(16, 168, 14, 80))     # bookcase west wall
+	_add.call(Rect2(20, 224, 36, 16))     # side records table
+
+	# Antechamber — central meeting table
+	_add.call(Rect2(340, 240, 100, 16))
+
+	# Vault — three plinths
+	_add.call(Rect2(374, 44, 20, 20))
+	_add.call(Rect2(514, 36, 24, 22))
+	_add.call(Rect2(182, 36, 24, 22))
+
+	# Armory — racks, crate
+	_add.call(Rect2(636, 136, 12, 52))
+	_add.call(Rect2(636, 204, 12, 52))
+	_add.call(Rect2(600, 196, 28, 24))
 
 # ── Zone labels ──────────────────────────────────────────────────────────────
 func _draw_zone_labels(font: Font):
@@ -531,14 +658,14 @@ func _draw_zone_labels(font: Font):
 	var label_col := Color(0.55, 0.50, 0.40, 0.38)
 	var loot_col  := Color(0.72, 0.60, 0.28, 0.55)
 	var sz := 9
-	draw_string(font, Vector2(308, 540), "— THE ENTRY FOYER —",    HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2( 32, 430), "— BARRACKS —",           HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(492, 430), "— STOREROOM —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2( 22, 258), "CAPTAIN'S OFFICE",       HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(345, 258), "ANTECHAMBER",            HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(634, 258), "ARMORY",                 HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(320, 100), "— THE VAULT —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
-	draw_string(font, Vector2(256,  20), loot_name,                HORIZONTAL_ALIGNMENT_LEFT, -1, sz, loot_col)
+	draw_string(font, Vector2(320, 548), "— THE ENTRY FOYER —",    HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2( 28, 450), "— BARRACKS —",           HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(476, 450), "— STOREROOM —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2( 22, 274), "CAPTAIN'S OFFICE",       HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(330, 274), "ANTECHAMBER",            HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(568, 274), "ARMORY",                 HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(330, 100), "— THE VAULT —",          HORIZONTAL_ALIGNMENT_LEFT, -1, sz, label_col)
+	draw_string(font, Vector2(264,  20), loot_name,                HORIZONTAL_ALIGNMENT_LEFT, -1, sz, loot_col)
 
 # ── Room furniture ────────────────────────────────────────────────────────────
 func _draw_room_furniture():
@@ -546,6 +673,7 @@ func _draw_room_furniture():
 	_draw_barracks_furniture()
 	_draw_storeroom_furniture()
 	_draw_captain_furniture()
+	_draw_antechamber_furniture()
 	_draw_vault_furniture()
 	_draw_armory_furniture()
 
@@ -1113,113 +1241,249 @@ func _svg_noticeboard(x: float, y: float, w: float, h: float):
 		Color(0.45, 0.08, 0.06), 0.4)
 
 # ─── ROOM-SPECIFIC ASSEMBLIES ─────────────────────────────────────────────────
+
+# ── Entry Foyer (x:176-592, y:480-560) ────────────────────────────────────────
+# Corridors: north-left x:224-272 @ y:448-480, north-right x:496-544 @ y:448-480
 func _draw_entry_furniture():
-	_svg_booth(280, 472, 20, 24)
-	_svg_booth(444, 472, 20, 24)
-	for nx: float in [252.0, 472.0]:
-		_svg_noticeboard(nx, 544, 22, 16)
+	# Guard booths flanking the entrance — clear of both north corridors
+	_svg_booth(196, 490, 20, 24)    # west booth (x:196-216, west of corridor at x:224) ✓
+	_svg_booth(556, 490, 20, 24)    # east booth (x:556-576, east of corridor at x:544) ✓
 
+	# Notice boards on south wall
+	_svg_noticeboard(232, 536, 22, 16)
+	_svg_noticeboard(508, 536, 22, 16)
+
+	# Central mosaic floor inlay (decorative grand foyer marker)
+	var inlay := Color(0.45, 0.38, 0.22, 0.30)
+	var cx: float = 384.0; var cy: float = 520.0
+	draw_polyline(PackedVector2Array([
+		Vector2(cx - 36, cy), Vector2(cx, cy - 20),
+		Vector2(cx + 36, cy), Vector2(cx, cy + 20), Vector2(cx - 36, cy)
+	]), Color(inlay.r, inlay.g, inlay.b, 0.45), 0.8)
+	draw_polyline(PackedVector2Array([
+		Vector2(cx - 20, cy), Vector2(cx, cy - 11),
+		Vector2(cx + 20, cy), Vector2(cx, cy + 11), Vector2(cx - 20, cy)
+	]), Color(inlay.r * 1.4, inlay.g * 1.4, inlay.b * 0.6, 0.55), 0.6)
+
+# ── Barracks (x:16-320, y:304-464) ────────────────────────────────────────────
+# Corridors: north x:112-160 @ y:272-320, south x:224-272 @ y:448-480
 func _draw_barracks_furniture():
-	for bx: float in [32, 80, 128, 176, 240]:
-		_svg_bed(bx, 316, 24, 22)
-	var tx: float = 40.0
-	while tx < 280.0:
-		var tw: float = minf(32.0, 280.0 - tx)
-		_svg_table(tx, 388, tw, 16)
-		tx += 32.0
-	for bench_y: float in [376.0, 406.0]:
-		var bx2: float = 48.0
-		while bx2 < 272.0:
-			_svg_bench(bx2, bench_y, minf(32.0, 272.0 - bx2), 8)
-			bx2 += 32.0
-	_svg_rack(20, 340, 12, 48)
+	# 5 bunks along north wall — 3 west of north corridor, 2 east of it
+	# North corridor mouth at x:112-160, keep clear at y:304-332 in that range
+	for bx: float in [16.0, 48.0, 80.0]:           # west of corridor (ends at x:108, gap before x:112) ✓
+		_svg_bed(bx, 308, 26, 22)
+	for bx: float in [168.0, 200.0]:               # east of corridor (starts at x:168, after x:160) ✓
+		_svg_bed(bx, 308, 26, 22)
 
+	# Weapon rack against west wall (clear of beds above and tables below)
+	_svg_rack(16, 356, 12, 52)
+
+	# Mess hall tables in lower section — clear of south corridor (x:224-272, y:448-480)
+	# Tables stop well east of x:220 to leave corridor approach open
+	_svg_table(48,  406, 40, 16)
+	_svg_table(92,  406, 40, 16)
+	_svg_table(136, 406, 40, 16)
+	_svg_table(180, 406, 36, 16)   # ends at x:216, south corridor at x:224 ✓
+
+	# Benches north and south of tables (same x bounds)
+	for bx: float in [52.0, 96.0, 140.0, 182.0]:
+		_svg_bench(bx, 396, 32, 8)
+	for bx: float in [52.0, 96.0, 140.0, 182.0]:
+		_svg_bench(bx, 424, 32, 8)
+
+	# Rune carvings along north wall (decorative)
+	var rune := Color(0.40, 0.55, 0.32, 0.35)
+	for i in range(3):
+		var rx: float = 32.0 + float(i) * 72.0
+		draw_circle(Vector2(rx, 308), 1.8, rune)
+		draw_line(Vector2(rx - 3, 308), Vector2(rx + 3, 308), rune, 0.6)
+		draw_line(Vector2(rx, 305), Vector2(rx, 311), rune, 0.6)
+
+# ── Storeroom (x:432-736, y:304-464) ──────────────────────────────────────────
+# Corridors: north x:576-624 @ y:272-320, south x:496-544 @ y:448-480
 func _draw_storeroom_furniture():
-	for cx: float in [480, 544, 608, 672]:
-		_svg_crate(cx, 340, 24, 24)
-	for cx: float in [496, 560, 624]:
-		_svg_crate(cx, 406, 24, 24)
-	_svg_crate(466, 374, 18, 18)
-	_svg_crate(658, 380, 18, 18)
+	# Crates in organised rows with clear navigation paths
+	# Avoid: north corridor mouth x:560-640 at y:304-340
+	# Avoid: south corridor mouth x:480-560 at y:432-464
 
+	# West bank (x:436-540, clear of north corridor to the east)
+	for cx: float in [436.0, 464.0, 492.0, 516.0]:
+		_svg_crate(cx, 324, 24, 24)
+
+	# East bank (x:648+, east of north corridor at x:624)
+	for cx: float in [648.0, 676.0, 700.0]:
+		_svg_crate(cx, 324, 24, 24)
+
+	# Middle row (navigation path runs east-west through center)
+	for cx: float in [436.0, 464.0, 552.0, 660.0, 688.0]:
+		_svg_crate(cx, 362, 24, 24)
+
+	# Lower row (clear of south corridor x:480-560)
+	for cx: float in [436.0, 576.0, 604.0, 648.0, 676.0]:
+		_svg_crate(cx, 400, 24, 24)
+
+# ── Captain's Office (x:16-272, y:128-288) ────────────────────────────────────
+# Corridors: vault-west x:128-176 @ y:96-144, east passage x:256-320 @ y:160-256
 func _draw_captain_furniture():
-	_svg_table(72, 196, 40, 18)
-	_svg_bench(80, 216, 20, 8)
-	_svg_plinth(28, 156, 18, 18)
-	# Rune carvings on north wall
-	var rune := Color(0.50, 0.38, 0.28, 0.42)
-	for i in range(4):
-		var rx: float = 30.0 + float(i) * 40.0
-		draw_circle(Vector2(rx, 136), 2.2, rune)
-		draw_line(Vector2(rx - 3.5, 136), Vector2(rx + 3.5, 136), rune, 0.7)
-		draw_line(Vector2(rx, 132.5), Vector2(rx, 139.5), rune, 0.7)
-		draw_arc(Vector2(rx, 136), 2.2, 0, TAU, 8, Color(rune.r, rune.g, rune.b, 0.25), 0.5)
-	# Bookcase
+	# ── Bookcase along west wall ───────────────────────────────────────────────
 	var bc_col := Color(0.22, 0.14, 0.06)
-	draw_rect(Rect2(226, 132, 16, 64), bc_col)
-	draw_rect(Rect2(226, 132, 16, 1.2), bc_col.lightened(0.30))
-	for by2 in range(4):
-		var row_y2: float = 136.0 + float(by2) * 14.0
-		draw_rect(Rect2(227, row_y2, 14, 10), Color(0.10, 0.08, 0.06))
-		draw_rect(Rect2(226, row_y2 + 10, 16, 1), bc_col.darkened(0.30))
-		var bk_cols: Array = [
-			Color(0.72, 0.22, 0.18), Color(0.22, 0.55, 0.28),
-			Color(0.45, 0.35, 0.65), Color(0.75, 0.65, 0.18),
-			Color(0.30, 0.40, 0.65),
-		]
+	draw_rect(Rect2(16, 170, 14, 88), bc_col)
+	draw_rect(Rect2(16, 170, 14, 1.2), bc_col.lightened(0.30))
+	var bk_cols: Array = [
+		Color(0.72, 0.22, 0.18), Color(0.22, 0.55, 0.28),
+		Color(0.45, 0.35, 0.65), Color(0.75, 0.65, 0.18),
+		Color(0.30, 0.40, 0.65),
+	]
+	for by2 in range(5):
+		var row_y2: float = 174.0 + float(by2) * 16.0
+		draw_rect(Rect2(17, row_y2, 12, 11), Color(0.10, 0.08, 0.06))
+		draw_rect(Rect2(16, row_y2 + 11, 14, 1), bc_col.darkened(0.30))
 		for bi in range(4):
-			var bx_book: float = 228.0 + float(bi) * 3.0
+			var bx_book: float = 17.5 + float(bi) * 2.8
 			var col: Color = bk_cols[(bi + by2) % bk_cols.size()]
-			draw_rect(Rect2(bx_book, row_y2 + 1, 2.4, 8.5), col)
+			draw_rect(Rect2(bx_book, row_y2 + 1, 2.4, 9.5), col)
 			draw_rect(Rect2(bx_book, row_y2 + 1, 2.4, 0.6), col.lightened(0.30))
-			# Gold band
 			if (bi + by2) % 2 == 0:
-				draw_rect(Rect2(bx_book, row_y2 + 4, 2.4, 0.5),
-					Color(0.90, 0.72, 0.20))
+				draw_rect(Rect2(bx_book, row_y2 + 5, 2.4, 0.5), Color(0.90, 0.72, 0.20))
 
+	# ── Command desk east of vault corridor opening ────────────────────────────
+	# Vault corridor mouth at x:128-176 in north wall — desk sits east of that
+	_svg_table(192, 134, 52, 18)   # x:192-244, well clear of corridor exit at x:176 ✓
+	_svg_bench(200, 154, 28, 8)    # officer's chair
+
+	# ── Records table in south-west alcove ─────────────────────────────────────
+	_svg_table(20, 228, 36, 16)
+	_svg_bench(24, 220, 28, 6)
+
+	# ── Trophy plinth in north-west corner ─────────────────────────────────────
+	_svg_plinth(48, 140, 16, 16)
+
+	# ── Notice boards on south wall ────────────────────────────────────────────
+	_svg_noticeboard(96, 260, 22, 16)
+	_svg_noticeboard(148, 260, 22, 16)
+
+	# ── Rune/sigil carvings along east wall (facing the corridor) ──────────────
+	var rune := Color(0.50, 0.38, 0.28, 0.38)
+	for i in range(4):
+		var ry: float = 174.0 + float(i) * 24.0
+		var rx: float = 246.0
+		draw_circle(Vector2(rx, ry), 2.0, rune)
+		draw_line(Vector2(rx - 3, ry), Vector2(rx + 3, ry), rune, 0.6)
+		draw_line(Vector2(rx, ry - 3), Vector2(rx, ry + 3), rune, 0.6)
+		draw_arc(Vector2(rx, ry), 2.0, 0, TAU, 7, Color(rune.r, rune.g, rune.b, 0.20), 0.4)
+
+# ── Antechamber (x:304-512, y:128-288) ────────────────────────────────────────
+# Corridors: west x:256-320 @ y:160-256, east x:496-576 @ y:160-256, vault x:400-432 @ y:96-144
+func _draw_antechamber_furniture():
+	# ── Stone columns flanking vault corridor entrance ─────────────────────────
+	# Vault-East corridor is at x:400-432; columns at x:352 and x:456 (flanking both sides)
+	var col_stone := Color(0.35, 0.28, 0.45)
+	var col_hi    := col_stone.lightened(0.28)
+	var col_dk    := col_stone.darkened(0.28)
+	for cx: float in [352.0, 456.0]:
+		draw_rect(Rect2(cx - 5, 140, 10, 5), col_stone.darkened(0.12))  # plinth base
+		draw_rect(Rect2(cx - 4, 130, 8, 11), col_stone)                  # column shaft
+		draw_rect(Rect2(cx - 4, 130, 1, 11), col_hi)                     # highlight
+		draw_rect(Rect2(cx + 3, 130, 1, 11), col_dk)                     # shadow
+		draw_rect(Rect2(cx - 5, 127, 10, 4), col_hi)                     # capital
+		draw_rect(Rect2(cx - 5, 127, 10, 1), col_hi.lightened(0.18))     # capital top
+		# Column base moulding
+		draw_rect(Rect2(cx - 6, 145, 12, 2), col_stone.darkened(0.20))
+
+	# ── Decorative shield/crest on north wall between columns ─────────────────
+	var shield_x: float = 408.0; var shield_y: float = 138.0
+	draw_circle(Vector2(shield_x, shield_y), 8.0, Color(0.30, 0.20, 0.12))
+	draw_circle(Vector2(shield_x, shield_y), 6.5, Color(0.42, 0.30, 0.18))
+	draw_circle(Vector2(shield_x, shield_y), 2.2, Color(0.85, 0.70, 0.22))
+	draw_line(Vector2(shield_x - 5.5, shield_y), Vector2(shield_x + 5.5, shield_y),
+		Color(0.24, 0.16, 0.08), 0.7)
+	draw_line(Vector2(shield_x, shield_y - 5.5), Vector2(shield_x, shield_y + 5.5),
+		Color(0.24, 0.16, 0.08), 0.7)
+	# Subtle glow from the crest
+	var glow_a: float = 0.12 + sin(_t * 1.8) * 0.06
+	draw_circle(Vector2(shield_x, shield_y), 12.0, Color(0.85, 0.70, 0.22, glow_a))
+
+	# ── Ceremonial meeting table in south half ─────────────────────────────────
+	# Placed in y:240-270, far from all corridors (corridors at y:160-256 only at x edges)
+	_svg_table(340, 240, 100, 16)   # x:340-440, y:240-256, center of room ✓
+
+	# Flanking benches (north and south of table, same x span)
+	_svg_bench(344, 228, 40, 10)    # north bench west
+	_svg_bench(396, 228, 40, 10)    # north bench east
+	_svg_bench(344, 258, 40, 10)    # south bench west
+	_svg_bench(396, 258, 40, 10)    # south bench east
+
+	# ── Animated floor censer in very center ──────────────────────────────────
+	var censer_x: float = 408.0; var censer_y: float = 196.0
+	# Censer smoke wisp
+	for wi in range(3):
+		var wp: float = _t * 1.2 + float(wi) * 2.1
+		var wx: float = censer_x + sin(wp) * 2.5
+		var wy: float = censer_y - 4.0 - fmod(wp * 1.5, 10.0)
+		var wa: float = clamp(1.0 - fmod(wp * 1.5, 10.0) / 10.0, 0.0, 1.0) * 0.30
+		draw_circle(Vector2(wx, wy), 1.2, Color(0.60, 0.50, 0.70, wa))
+	# Censer bowl
+	draw_circle(Vector2(censer_x, censer_y), 3.5, Color(0.32, 0.24, 0.40))
+	draw_arc(Vector2(censer_x, censer_y), 3.5, PI, TAU, 10,
+		Color(0.55, 0.45, 0.65), 0.7)
+	draw_circle(Vector2(censer_x, censer_y - 1), 1.5, Color(0.70, 0.55, 0.80, 0.60))
+
+# ── Vault (x:96-672, y:16-112) ────────────────────────────────────────────────
+# Corridors: vault-west x:128-176 @ y:96-144, vault-east x:400-432 @ y:96-144
 func _draw_vault_furniture():
 	var pulse: float = abs(sin(_t * 1.5))
-	# Floor inlay diamond mosaic
-	var inlay := Color(C_FLOOR_VAULT_A.r + 0.08, C_FLOOR_VAULT_A.g + 0.04, C_FLOOR_VAULT_A.b + 0.12, 0.75)
+
+	# ── Grand floor inlay — symmetrical diamond lattice ────────────────────────
+	var inlay := Color(C_FLOOR_VAULT_A.r + 0.08, C_FLOOR_VAULT_A.g + 0.04, C_FLOOR_VAULT_A.b + 0.14, 0.75)
+	# Outer diamond
 	var pts := PackedVector2Array([
-		Vector2(384, 22), Vector2(448, 56),
-		Vector2(384, 90), Vector2(320, 56),
+		Vector2(384, 22), Vector2(460, 56),
+		Vector2(384, 90), Vector2(308, 56),
 	])
-	draw_colored_polygon(pts, Color(inlay.r, inlay.g, inlay.b, 0.12))
+	draw_colored_polygon(pts, Color(inlay.r, inlay.g, inlay.b, 0.10))
 	draw_polyline(PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]]),
-		Color(inlay.r, inlay.g, inlay.b, 0.32), 0.8)
-	var inner: Array = [Vector2(384, 38), Vector2(416, 56), Vector2(384, 74), Vector2(352, 56)]
+		Color(inlay.r, inlay.g, inlay.b, 0.30), 0.8)
+	# Inner diamond
+	var inner: Array = [Vector2(384, 36), Vector2(420, 56), Vector2(384, 76), Vector2(348, 56)]
 	draw_polyline(PackedVector2Array(inner + [inner[0]]),
-		Color(inlay.r * 1.5, inlay.g * 1.5, inlay.b * 2.0, 0.40 + pulse * 0.10), 0.7)
-	# Arcane glow ground
-	var glow: Color = Color(0.58, 0.35, 0.88, 0.16 + pulse * 0.10)
-	draw_circle(Vector2(384, 56), 32.0, glow)
+		Color(inlay.r * 1.4, inlay.g * 1.4, inlay.b * 2.0, 0.38 + pulse * 0.10), 0.7)
+	# Cross lines through diamond
+	draw_line(Vector2(308, 56), Vector2(460, 56), Color(inlay.r, inlay.g, inlay.b, 0.18), 0.5)
+	draw_line(Vector2(384, 22), Vector2(384, 90), Color(inlay.r, inlay.g, inlay.b, 0.18), 0.5)
 
-	# Grand plinth (artifact)
-	_svg_plinth(374, 62, 20, 18)
+	# Arcane glow pool under central plinth
+	var glow: Color = Color(0.58, 0.35, 0.88, 0.18 + pulse * 0.10)
+	draw_circle(Vector2(384, 56), 36.0, glow)
+	draw_circle(Vector2(384, 56), 20.0, Color(glow.r, glow.g, glow.b, glow.a * 1.6))
 
-	# Side altar east
-	_svg_plinth(558, 50, 28, 22)
+	# ── Three plinths: grand central + two flanking altars ─────────────────────
+	# Grand plinth at vault center
+	_svg_plinth(374, 44, 20, 20)
 
-	# Wall bracket sconces
+	# West altar — clear of vault-west corridor (x:128-176); plinth at x:182
+	_svg_plinth(182, 36, 24, 22)
+
+	# East altar — clear of vault-east corridor (x:400-432); plinth at x:514
+	_svg_plinth(514, 36, 24, 22)
+
+	# ── Wall bracket sconces ──────────────────────────────────────────────────
 	var bracket := Color(0.42, 0.30, 0.50)
-	for sx: float in [162.0, 590.0]:
+	for sx: float in [112.0, 248.0, 624.0]:
 		draw_rect(Rect2(sx, 18, 12, 8), bracket)
 		draw_rect(Rect2(sx + 2, 16, 8, 4), Color(bracket.r * 1.3, bracket.g * 1.2, bracket.b * 1.4))
 		draw_line(Vector2(sx + 6, 18), Vector2(sx + 6, 24), bracket, 1.5)
 
-	# Cobwebs
-	var web := Color(0.48, 0.44, 0.52, 0.32)
-	_draw_cobweb(Vector2(132, 18), Vector2(1, 1), web)
-	_draw_cobweb(Vector2(636, 18), Vector2(-1, 1), web)
+	# ── Cobwebs in far corners ─────────────────────────────────────────────────
+	var web := Color(0.48, 0.44, 0.52, 0.28)
+	_draw_cobweb(Vector2(100, 18), Vector2(1, 1), web)
+	_draw_cobweb(Vector2(660, 18), Vector2(-1, 1), web)
 
-	# Gold piles
+	# ── Gold coin piles (symmetric around center) ──────────────────────────────
 	var gold_a := Color(0.92, 0.74, 0.18)
 	var gold_b := Color(0.72, 0.54, 0.10)
-	for corner in [Vector2(166, 28), Vector2(598, 28), Vector2(228, 78), Vector2(540, 78)]:
-		# Pile shadow
-		draw_circle(corner + Vector2(0, 2), 7.0, Color(0, 0, 0, 0.30))
-		for ci in range(8):
+	for corner: Vector2 in [Vector2(148, 28), Vector2(620, 28), Vector2(240, 80), Vector2(528, 80)]:
+		draw_circle(corner + Vector2(0, 2), 7.0, Color(0, 0, 0, 0.28))
+		for ci in range(9):
 			var cr: float = 1.4 + float(ci % 3) * 0.7
 			var co: Vector2 = Vector2(float(ci % 4) * 3 - 5, float(ci / 4) * 3 - 2)
 			draw_circle(corner + co, cr, gold_a if ci % 2 == 0 else gold_b)
@@ -1227,33 +1491,50 @@ func _draw_vault_furniture():
 				draw_circle(corner + co - Vector2(0.4, 0.4), cr * 0.4,
 					Color(1.0, 0.98, 0.80, 0.65))
 
+# ── Armory (x:560-736, y:128-288) ─────────────────────────────────────────────
+# Corridors: west x:496-576 @ y:160-256, north (storeroom) x:576-624 @ y:272-320
 func _draw_armory_furniture():
-	_svg_rack(636, 148, 12, 52)
-	_svg_rack(636, 216, 12, 52)
-	_svg_crate(646, 196, 28, 22)
-	# Armor stand
-	var as_x := 644.0; var as_y := 150.0
-	# Shadow
-	draw_circle(Vector2(as_x + 8, as_y + 28), 6.0, Color(0, 0, 0, 0.35))
-	# Stand pole
-	draw_rect(Rect2(as_x + 7, as_y + 24, 2, 8), Color(0.22, 0.18, 0.12))
+	# Two tall weapon racks along east wall (x:720-736 region)
+	_svg_rack(706, 136, 12, 52)
+	_svg_rack(706, 204, 12, 52)
+
+	# Heavy iron crate in south-east corner
+	_svg_crate(672, 248, 28, 24)
+
+	# Second crate cluster — mid east wall
+	_svg_crate(676, 196, 24, 22)
+
+	# Small crate stack against north wall (east of room, clear of west corridor at x:496-576)
+	_svg_crate(596, 136, 22, 20)
+	_svg_crate(622, 136, 22, 20)
+
+	# ── Armor stand in north-west of armory (clear of west corridor x:496-576) ──
+	var as_x := 584.0; var as_y := 148.0
+	draw_circle(Vector2(as_x + 8, as_y + 30), 7.0, Color(0, 0, 0, 0.35))  # shadow
+	draw_rect(Rect2(as_x + 7, as_y + 22, 2, 10), Color(0.22, 0.18, 0.12))  # pole
 	# Helm
-	draw_circle(Vector2(as_x + 8, as_y + 8), 5.0, Color(0.42, 0.42, 0.50))
-	draw_circle(Vector2(as_x + 8, as_y + 7), 4.4, Color(0.52, 0.52, 0.60))
-	# Visor slit
-	draw_rect(Rect2(as_x + 5, as_y + 7.5, 6, 1), Color(0.10, 0.10, 0.12))
-	# Plume
-	draw_line(Vector2(as_x + 8, as_y + 3), Vector2(as_x + 7, as_y - 1),
-		Color(0.70, 0.20, 0.20), 1.2)
+	draw_circle(Vector2(as_x + 8, as_y + 8), 5.5, Color(0.42, 0.42, 0.50))
+	draw_circle(Vector2(as_x + 8, as_y + 7), 4.8, Color(0.54, 0.54, 0.62))
+	draw_rect(Rect2(as_x + 5, as_y + 7.5, 7, 1.2), Color(0.10, 0.10, 0.12))  # visor
+	draw_line(Vector2(as_x + 8, as_y + 2), Vector2(as_x + 7, as_y - 2),
+		Color(0.72, 0.18, 0.18), 1.4)  # plume
 	# Torso
-	draw_rect(Rect2(as_x + 3, as_y + 13, 10, 14), Color(0.40, 0.40, 0.46))
-	draw_rect(Rect2(as_x + 3, as_y + 13, 10, 1), Color(0.60, 0.60, 0.68))
-	# Chest emblem
-	draw_circle(Vector2(as_x + 8, as_y + 19), 1.8, Color(0.85, 0.70, 0.22))
-	draw_circle(Vector2(as_x + 8, as_y + 19), 1.0, Color(0.60, 0.45, 0.10))
-	# Arms (pauldrons)
-	draw_circle(Vector2(as_x + 1, as_y + 15), 2.5, Color(0.40, 0.40, 0.46))
-	draw_circle(Vector2(as_x + 15, as_y + 15), 2.5, Color(0.40, 0.40, 0.46))
+	draw_rect(Rect2(as_x + 2, as_y + 13, 12, 12), Color(0.40, 0.40, 0.48))
+	draw_rect(Rect2(as_x + 2, as_y + 13, 12, 1), Color(0.62, 0.62, 0.70))
+	draw_circle(Vector2(as_x + 8, as_y + 18), 2.0, Color(0.85, 0.70, 0.22))  # emblem
+	draw_circle(Vector2(as_x + 8, as_y + 18), 1.1, Color(0.60, 0.45, 0.10))
+	draw_circle(Vector2(as_x,     as_y + 14), 3.0, Color(0.40, 0.40, 0.48))  # pauldrons
+	draw_circle(Vector2(as_x + 16, as_y + 14), 3.0, Color(0.40, 0.40, 0.48))
+
+	# ── Trophy shield on south wall ────────────────────────────────────────────
+	var sh_x: float = 648.0; var sh_y: float = 264.0
+	draw_circle(Vector2(sh_x, sh_y), 9.0, Color(0.35, 0.22, 0.12))
+	draw_circle(Vector2(sh_x, sh_y), 7.0, Color(0.52, 0.38, 0.20))
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(sh_x, sh_y - 4.5), Vector2(sh_x + 3.5, sh_y),
+		Vector2(sh_x, sh_y + 4.5), Vector2(sh_x - 3.5, sh_y),
+	]), Color(0.88, 0.72, 0.22))
+	draw_circle(Vector2(sh_x, sh_y), 1.5, Color(0.50, 0.36, 0.10))
 
 func _draw_cobweb(origin: Vector2, dir: Vector2, col: Color):
 	for i in range(4):

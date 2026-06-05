@@ -7,6 +7,7 @@ var run_time    := 0.0
 var takedowns   := 0
 var times_alerted      := 0
 var bonus_loot_collected := false
+var floors_bonus_collected: int = 0  # count of floors where bonus loot was grabbed
 var gold_collected := 0
 var gold_spent     := 0
 
@@ -17,7 +18,7 @@ var modifier_desc   := "No special conditions."
 
 # Multi-floor state
 var current_floor   := 1
-const MAX_FLOORS    := 5
+const MAX_FLOORS    := 6
 
 # Alert escalation — cumulative alerts across all floors; guards get harder
 var alert_escalation := 0
@@ -30,6 +31,7 @@ var _wanted_bribe_used := false  # one bribe reduction per run
 # ── Health — carried between floors ─────────────────────────────────────────
 var player_hp: int     = 6
 var player_max_hp: int = 6
+var _base_max_hp: int  = 6  # class baseline, for IRON_HEART relic cap
 
 # ── Injury flags — carried between floors ────────────────────────────────────
 var player_is_bleeding := false
@@ -75,19 +77,26 @@ var floor_carry_equipped: Array[int] = []
 # Passive upgrades picked between floors
 var active_passives: Array[String] = []
 
+# ── Relic system — persistent within a run ───────────────────────────────────
+var collected_relics: Array = []
+
+# ── In-run XP / level-up ──────────────────────────────────────────────────────
+var run_xp: int   = 0
+var run_level: int = 0
+
 # Second wind — once-per-floor passive save
 var second_wind_used := false
 var iron_will_used   := false  # DWARF once-per-run takedown save
 
-# Persistent stats (saved to disk)
-var lifetime_gold       := 0
-var runs_completed      := 0
-var runs_attempted      := 0
-var best_rating         := ""
-var guild_rep           := 0
-var lifetime_takedowns  := 0
-var lifetime_alerts     := 0
-var ghost_runs          := 0   # completed with 0 alerts
+# Persistent stats — synced from MetaProgress in _ready(); MetaProgress is canonical.
+var lifetime_gold:      int    = 0
+var runs_completed:     int    = 0
+var runs_attempted:     int    = 0
+var best_rating:        String = ""
+var guild_rep:          int    = 0
+var lifetime_takedowns: int    = 0
+var lifetime_alerts:    int    = 0
+var ghost_runs:         int    = 0
 
 const GUILD_TIERS := [
 	{"rep": 0,   "title": "Street Rat",     "color": Color(0.55, 0.55, 0.55)},
@@ -99,11 +108,7 @@ const GUILD_TIERS := [
 ]
 
 func get_guild_tier() -> Dictionary:
-	var best: Dictionary = GUILD_TIERS[0]
-	for t in GUILD_TIERS:
-		if guild_rep >= t.rep:
-			best = t
-	return best
+	return MetaProgress.get_guild_tier()
 
 const SAVE_PATH = "user://contraband_save.cfg"
 
@@ -114,6 +119,8 @@ signal show_shop
 signal show_passive_pick
 signal reinforcement_incoming
 signal death_save_rolled(roll: int, survived: bool)
+signal relic_collected(relic_id: String)
+signal show_level_up(choices: Array)
 
 func shake(intensity: float, duration: float):
 	screen_shake.emit(intensity, duration)
@@ -193,15 +200,22 @@ const CLASSES := {
 
 # ── Challenge contracts (optional opt-in hard modes) ─────────────────────────
 const CHALLENGE_CONTRACTS := [
-	{"id": "PHANTOM_PROTOCOL", "name": "Phantom Protocol", "desc": "Trigger zero alerts across all 3 floors.", "bonus": 600},
-	{"id": "HIRED_BLADE",      "name": "Hired Blade",      "desc": "Take down 6 or more guards total.",        "bonus": 500},
-	{"id": "SPEED_DEMON",      "name": "Speed Demon",      "desc": "Escape all 3 floors in under 4 minutes.",  "bonus": 700},
+	{"id": "PHANTOM_PROTOCOL", "name": "Phantom Protocol", "desc": "Trigger zero alerts across all floors.",        "bonus": 600},
+	{"id": "HIRED_BLADE",      "name": "Hired Blade",      "desc": "Take down 6 or more guards total.",             "bonus": 500},
+	{"id": "SPEED_DEMON",      "name": "Speed Demon",      "desc": "Escape all floors in under 4 minutes.",         "bonus": 700},
+	{"id": "CLEAN_HANDS",      "name": "Clean Hands",      "desc": "Escape without any takedowns (zero kills).",    "bonus": 750},
+	{"id": "THE_COLLECTOR",    "name": "The Collector",    "desc": "Collect every loot item on each floor.",        "bonus": 550},
+	{"id": "IRON_RUN",         "name": "Iron Run",         "desc": "Complete the run without buying any shop items.","bonus": 650},
 ]
 
 var active_contract  := "NONE"
 var contract_name    := ""
 var contract_desc    := ""
 var contract_bonus   := 0
+
+# Pre-heist planning state (set by PreHeist scene)
+var preheist_intel: Array          = []   # purchased intel card IDs (untyped — receives .duplicate() from PreHeist)
+var preheist_entry := "FRONT_DOOR"        # selected entry option ID
 
 var _insurance_used   := false
 var _racial_luck_used := false  # HALFLING one-per-floor alert negate
@@ -295,6 +309,14 @@ const QUARTERMASTER_REACTIONS := {
 		"Halfway through. The hard half is ahead.",
 		"You've come far enough that turning back would be stupid. So don't.",
 	],
+	"floor_5": [
+		"The throne floor. If you're still alive, you earned it.",
+		"One more run and we're done. Don't get sentimental about it.",
+	],
+	"floor_6": [
+		"The Citadel. End of the line. Make it count.",
+		"Whatever's in that vault — the guild doesn't ask, and you don't answer. Just bring it back.",
+	],
 }
 
 func get_broker_briefing() -> String:
@@ -356,6 +378,11 @@ const MISSION_BRIEFS := {
 		"The throne room. The Archduke himself may be present. If he is — the Broker says not to complicate things. The Broker has never been inside.",
 		"This is the job all three floors were building toward. One artifact. One exit. Don't give them time to lock it down.",
 		"City Watch has been called in. This is what wanted level 5 looks like. Get the relic and get out — the city is awake.",
+	],
+	6: [
+		"The Citadel. The last door. Whatever the Broker has been building toward — it ends here. There are no more floors after this.",
+		"Citadel guard count: unknown. Alarm bells on every corridor. The Broker is not answering messages. Go in anyway.",
+		"The guild's founding contract ends with this job. Forty years of patience, six floors of evidence. The Citadel vault opens tonight.",
 	],
 }
 
@@ -451,6 +478,12 @@ const FLOOR_LOOT_POOL := {
 		{"name": "The Crown Sapphire",        "desc": "Ceremonial. Priceless. The Broker wants it in a private collection by morning."},
 		{"name": "The Grand Compact",         "desc": "A treaty signed by four noble houses. Whoever holds it controls the city's next decade."},
 	],
+	6: [
+		{"name": "The Obsidian Key",          "desc": "It opens nothing you can see. The Broker said only: 'You'll know when.' He was right."},
+		{"name": "The Emperor's Cipher",      "desc": "A document that should not exist — written by a dead emperor, dated six months ago. The Broker went quiet when you handed it over."},
+		{"name": "The Last Reckoning",        "desc": "Every debt, every betrayal, every name the guild has collected for thirty years. The final entry is yours."},
+		{"name": "The Vanishing Accord",      "desc": "Signed by three powers, ratified by none. One line erases a border that's been contested for a century. Tonight you carried history."},
+	],
 }
 
 # Set at run start from pool
@@ -482,6 +515,14 @@ const PASSIVES := [
 	{"id": "LOCKSMITH",     "name": "Locksmith",       "desc": "Smoke grenades last 50% longer.",                "color": Color(0.45, 0.85, 0.55)},
 	{"id": "INSURANCE",     "name": "Insurance",       "desc": "One alert per floor costs no escalation.",       "color": Color(0.85, 0.70, 0.30)},
 	{"id": "SCAVENGER",     "name": "Scavenger",       "desc": "Floor item pickups give 1 extra item.",          "color": Color(0.70, 0.55, 0.35)},
+	{"id": "NERVE_STEEL",   "name": "Nerve Steel",     "desc": "First takedown each floor always succeeds (auto-crit).", "color": Color(0.80, 0.65, 0.20)},
+	{"id": "OPPORTUNIST",   "name": "Opportunist",     "desc": "Side-angle takedowns gain +3 to the d20 roll.",   "color": Color(0.75, 0.85, 0.35)},
+	{"id": "SHADOW_VEIL",   "name": "Shadow Veil",     "desc": "Entering a torch-free shadow resets all detection bars.", "color": Color(0.30, 0.20, 0.55)},
+	{"id": "BELL_BREAKER",  "name": "Bell Breaker",    "desc": "You can disable alarm bells silently from 2 tiles away.", "color": Color(0.70, 0.40, 0.10)},
+	{"id": "SHADOW_STEP_MASTERY", "name": "Step Mastery", "desc": "Shadow Step cooldown reduced by 50% and costs no charges.", "color": Color(0.50, 0.25, 0.90)},
+	{"id": "BODY_SNATCHER", "name": "Body Snatcher",   "desc": "Picking up a body resets the detection bar of the nearest guard.", "color": Color(0.35, 0.55, 0.35)},
+	{"id": "COIN_TOSS",     "name": "Coin Toss",       "desc": "Coin distractions last 3× longer and attract two guards.", "color": Color(0.90, 0.78, 0.15)},
+	{"id": "SLIPPERY",      "name": "Slippery",        "desc": "Dodge roll recharges 40% faster. Immune to oil slick slowdown.", "color": Color(0.55, 0.85, 0.65)},
 ]
 
 # ── Guild reputation unlocks ──────────────────────────────────────────────────
@@ -492,6 +533,121 @@ const GUILD_UNLOCKS := [
 	{"rep": 100, "id": "SHADOW_GUILD",  "name": "Shadow Guild",  "desc": "Detection fills 20% slower always."},
 	{"rep": 150, "id": "MASTERTHIEF",   "name": "Master Thief",  "desc": "Natural 1 on d20 is treated as 5."},
 ]
+
+# ── Relics — rare permanent items found in chests and on bosses ───────────────
+const RELICS := [
+	# Movement / stealth
+	{"id": "PHANTOM_BOOTS",  "name": "Phantom Boots",   "rarity": 1,
+	 "desc": "Walking never makes noise, even on glass.",
+	 "color": Color(0.55, 0.85, 0.95)},
+	{"id": "VOID_CLOAK",     "name": "Void Cloak",      "rarity": 2,
+	 "desc": "Entering shadow instantly drops all detection bars to zero.",
+	 "color": Color(0.35, 0.10, 0.70)},
+	{"id": "SMOKE_SOUL",     "name": "Smoke Soul",      "rarity": 2,
+	 "desc": "You leave a smoke trail for 2s after dashing or using rope.",
+	 "color": Color(0.55, 0.75, 0.65)},
+	{"id": "BLOOD_CHALICE",  "name": "Blood Chalice",   "rarity": 1,
+	 "desc": "Each takedown restores 1 HP (max once per floor).",
+	 "color": Color(0.85, 0.20, 0.20)},
+	# Combat / dice
+	{"id": "BONE_DICE",      "name": "Bone Dice",       "rarity": 1,
+	 "desc": "Roll d20 twice, take the higher result.",
+	 "color": Color(0.90, 0.88, 0.80)},
+	{"id": "LUCKY_COIN",     "name": "Lucky Coin",      "rarity": 1,
+	 "desc": "+3 to all d20 rolls.",
+	 "color": Color(0.95, 0.78, 0.15)},
+	{"id": "DOUBLE_EDGE",    "name": "Double-Edge Blade","rarity": 2,
+	 "desc": "NAT20 also deals 1 damage to an adjacent second guard. NAT1 now does self-damage.",
+	 "color": Color(0.90, 0.40, 0.10)},
+	{"id": "ASSASSIN_MARK",  "name": "Assassin's Mark", "rarity": 2,
+	 "desc": "Once per floor, your next takedown auto-succeeds regardless of roll.",
+	 "color": Color(0.85, 0.15, 0.15)},
+	# Economy
+	{"id": "COIN_EFFIGY",    "name": "Coin Effigy",     "rarity": 1,
+	 "desc": "All gold pickups are worth 50% more.",
+	 "color": Color(0.95, 0.82, 0.15)},
+	{"id": "BLOOD_MONEY",    "name": "Blood Money Idol", "rarity": 1,
+	 "desc": "Each takedown awards an extra 40 gp.",
+	 "color": Color(0.75, 0.50, 0.20)},
+	# Survival / defence
+	{"id": "IRON_HEART",     "name": "Iron Heart",      "rarity": 1,
+	 "desc": "Start each floor with +2 maximum HP (stacks, max +6 total).",
+	 "color": Color(0.80, 0.65, 0.20)},
+	{"id": "SHADOW_CROWN",   "name": "Shadow Crown",    "rarity": 3,
+	 "desc": "While at full HP, guards' detection speed is halved.",
+	 "color": Color(0.65, 0.30, 0.90)},
+	# Utility / special
+	{"id": "TIMELESS_GLASS", "name": "Timeless Glass",  "rarity": 2,
+	 "desc": "Floor heat never escalates — guard speed stays constant.",
+	 "color": Color(0.60, 0.90, 0.80)},
+	{"id": "SENTINEL_EYE",   "name": "Sentinel's Eye",  "rarity": 2,
+	 "desc": "All guards are always visible through walls on the minimap.",
+	 "color": Color(0.55, 0.90, 0.40)},
+	{"id": "CURSED_MASK",    "name": "Cursed Mask",     "rarity": 3,
+	 "desc": "INQUISITOR guards cannot sense you. Guards in shadow cannot detect you at all.",
+	 "color": Color(0.30, 0.55, 0.70)},
+]
+
+# ── In-run level-up choices ───────────────────────────────────────────────────
+const LEVEL_UP_CHOICES := [
+	{"id": "LVL_HP",      "name": "+2 Max HP",         "desc": "Permanently gain 2 maximum HP this run.", "color": Color(0.85, 0.30, 0.30)},
+	{"id": "LVL_DICE",    "name": "Sharp Instincts",    "desc": "+1 to all d20 rolls for the rest of this run.", "color": Color(0.95, 0.78, 0.15)},
+	{"id": "LVL_GOLD",    "name": "Gold Sense",         "desc": "All gold pickups worth +25% for the rest of this run.", "color": Color(0.90, 0.78, 0.10)},
+	{"id": "LVL_STEALTH", "name": "Shadow Training",    "desc": "Detection speed -20% for the rest of this run.", "color": Color(0.45, 0.30, 0.75)},
+	{"id": "LVL_HEAL",    "name": "Second Breath",      "desc": "Immediately restore 3 HP.", "color": Color(0.35, 0.88, 0.55)},
+	{"id": "LVL_NOISE",   "name": "Padded Steps",       "desc": "All movement noise radius -30% for this run.", "color": Color(0.55, 0.85, 0.95)},
+	{"id": "LVL_COMBO",   "name": "Relentless",         "desc": "Combo resets on taking damage only, not on missing.", "color": Color(0.80, 0.40, 0.10)},
+]
+
+const XP_PER_LEVEL := 3   # XP needed to level up
+const XP_MAX_LEVEL := 4   # cap at level 4
+
+func has_relic(id: String) -> bool:
+	return id in collected_relics
+
+func add_relic(id: String) -> void:
+	if not has_relic(id):
+		collected_relics.append(id)
+		relic_collected.emit(id)
+
+func get_relic_data_by_id(id: String) -> Dictionary:
+	for r in RELICS:
+		if r.id == id:
+			return r
+	return {}
+
+func add_xp(amount: int) -> void:
+	if run_level >= XP_MAX_LEVEL:
+		return
+	run_xp += amount
+	while run_xp >= XP_PER_LEVEL and run_level < XP_MAX_LEVEL:
+		run_xp -= XP_PER_LEVEL
+		run_level += 1
+		var choices := roll_level_up_choices()
+		show_level_up.emit(choices)
+
+func roll_level_up_choices() -> Array:
+	var pool: Array = LEVEL_UP_CHOICES.duplicate()
+	pool.shuffle()
+	return pool.slice(0, mini(3, pool.size()))
+
+func apply_level_up_choice(id: String) -> void:
+	match id:
+		"LVL_HP":
+			player_max_hp += 2
+			player_hp = mini(player_hp + 2, player_max_hp)
+		"LVL_DICE":
+			add_passive("LVL_DICE_BONUS")
+		"LVL_GOLD":
+			add_passive("LVL_GOLD_BONUS")
+		"LVL_STEALTH":
+			add_passive("LVL_STEALTH_BONUS")
+		"LVL_HEAL":
+			heal_hp(3)
+		"LVL_NOISE":
+			add_passive("LVL_NOISE_BONUS")
+		"LVL_COMBO":
+			add_passive("LVL_COMBO_BONUS")
 
 # ── Weapons (3 tiers per class + universal finds) ────────────────────────────
 # tags: any of "shadow","silent","piercing","ranged","throwable","heavy","cursed"
@@ -680,6 +836,7 @@ const FLOOR_WEAPON_POOL := {
 	3: ["VENOM_NEEDLE", "SMOKE_BLADE", "RUNED_BLADE", "WAND"],
 	4: ["RUNED_BLADE", "SMOKE_BLADE", "WAND"],
 	5: ["RUNED_BLADE", "WAND"],
+	6: ["RUNED_BLADE", "WAND", "BLADESONG", "VOID_REAPER", "SILENT_BOLT"],
 }
 
 func get_floor_weapon_drops(floor_num: int) -> Array:
@@ -892,6 +1049,9 @@ func check_contract_complete() -> bool:
 		"PHANTOM_PROTOCOL": return times_alerted == 0
 		"HIRED_BLADE":      return takedowns >= 6
 		"SPEED_DEMON":      return run_time <= 240.0
+		"CLEAN_HANDS":      return takedowns == 0
+		"THE_COLLECTOR":    return floors_bonus_collected >= current_floor - 1 and bonus_loot_collected
+		"IRON_RUN":         return gold_spent == 0
 	return false
 
 func pick_modifier() -> Dictionary:
@@ -963,10 +1123,23 @@ func get_d20_bonus() -> int:
 	if run_modifier == "LUCKY_BREAK": b += 4
 	if run_modifier == "CURSED_DICE": b -= 3
 	if has_passive("IRON_NERVES"):    b += 2
+	if has_passive("LVL_DICE_BONUS"): b += 1
+	if has_relic("LUCKY_COIN"):       b += 3
 	return b
 
 func roll_d20() -> int:
-	return clampi(randi_range(1, 20) + get_d20_bonus(), 1, 20)
+	var roll: int = randi_range(1, 20)
+	# BONE_DICE relic: roll twice, take higher
+	if has_relic("BONE_DICE"):
+		var roll2: int = randi_range(1, 20)
+		roll = maxi(roll, roll2)
+	# HALFLING Lucky: reroll natural 1s (once auto, then the reroll stands)
+	if roll == 1 and selected_race == "HALFLING":
+		roll = randi_range(1, 20)
+	# MASTERTHIEF guild unlock: nat 1 treated as 5
+	if roll == 1 and MetaProgress.has_unlock("MASTERTHIEF"):
+		roll = 5
+	return clampi(roll + get_d20_bonus(), 1, 20)
 
 func roll_death_save() -> int:
 	return randi_range(1, 20)
@@ -1022,26 +1195,39 @@ func get_guild_unlock(id: String) -> bool:
 	return false
 
 func get_next_guild_unlock() -> Dictionary:
-	for u in GUILD_UNLOCKS:
-		if guild_rep < u.rep:
-			return u
-	return {}
+	return MetaProgress.get_next_tier()
 
 func get_pending_rep_gain() -> int:
-	match get_rating():
-		"PHANTOM THIEF": return 10
-		"SHADOWBLADE":   return 7
-		"SELLSWORD":     return 4
-		_:               return 2
+	var floors: int = current_floor - 1
+	var ghost: bool = times_alerted == 0
+	var rep: int = 5 + floors * 3
+	if ghost: rep += 5
+	var rating := get_rating()
+	if rating in ["PHANTOM THIEF", "SHADOWBLADE"]: rep += 4
+	return rep
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
+func _ready() -> void:
+	_sync_from_meta()
+
+func _sync_from_meta() -> void:
+	lifetime_gold      = MetaProgress.lifetime_gold
+	runs_completed     = MetaProgress.runs_completed
+	runs_attempted     = MetaProgress.runs_attempted
+	best_rating        = MetaProgress.best_rating
+	guild_rep          = MetaProgress.guild_rep
+	lifetime_takedowns = MetaProgress.lifetime_takedowns
+	lifetime_alerts    = MetaProgress.lifetime_alerts
+	ghost_runs         = MetaProgress.ghost_runs
+
 func _process(delta):
 	if state == State.PLAYING:
 		run_time += delta
-		floor_heat_accum += delta
-		if floor_heat_accum >= 60.0:
-			floor_heat_accum -= 60.0
-			floor_heat_level += 1
+		if not has_relic("TIMELESS_GLASS"):
+			floor_heat_accum += delta
+			if floor_heat_accum >= 60.0:
+				floor_heat_accum -= 60.0
+				floor_heat_level += 1
 		if _vanish_active:
 			_vanish_timer -= delta
 			if _vanish_timer <= 0.0:
@@ -1108,6 +1294,8 @@ func leave_shop():
 		get_tree().change_scene_to_file("res://World.tscn")
 
 var _ward_resist_used := false
+var _blood_chalice_used_this_floor := false
+var _assassin_mark_used := false  # once per floor
 
 func start_floor_timer():
 	_floor_start_time     = run_time
@@ -1122,6 +1310,8 @@ func start_floor_timer():
 	_insurance_used       = false
 	_ward_resist_used     = false
 	_lockdown_incoming    = false
+	_blood_chalice_used_this_floor = false
+	_assassin_mark_used   = false
 	# iron_will_used is per-run — only reset on go_to_class_select()
 	_racial_luck_used     = false
 	_vanish_active        = false
@@ -1129,8 +1319,15 @@ func start_floor_timer():
 	apply_racial_passives()
 	if get_guild_unlock("GUILD_MARK"):
 		add_gold(50)
+	# IRON_HEART relic: +2 max HP per floor (cap +6 total)
+	if has_relic("IRON_HEART"):
+		var bonus: int = mini(2, 6 - (player_max_hp - _base_max_hp))
+		if bonus > 0:
+			player_max_hp += bonus
+			player_hp = mini(player_hp + bonus, player_max_hp)
+	# TIMELESS_GLASS: disable heat accumulation — done in _process
 
-func record_takedown(is_frontal: bool = false):
+func record_takedown(is_frontal: bool = false, is_loud: bool = false):
 	takedowns += 1
 	floor_takedowns += 1
 	lifetime_takedowns += 1
@@ -1138,8 +1335,17 @@ func record_takedown(is_frontal: bool = false):
 		add_gold(50)
 	if selected_class == "ASSASSIN" and is_frontal:
 		add_gold(120)
+	if selected_class == "SELLSWORD" and is_loud:
+		add_gold(80)
 	if has_passive("PICKPOCKET"):
 		add_gold(35)
+	if has_relic("BLOOD_MONEY"):
+		add_gold(40)
+	# BLOOD_CHALICE: heal once per floor on takedown
+	if has_relic("BLOOD_CHALICE") and not _blood_chalice_used_this_floor:
+		heal_hp(1)
+		_blood_chalice_used_this_floor = true
+	add_xp(1)
 
 func record_alert():
 	times_alerted += 1
@@ -1156,9 +1362,16 @@ func record_alert():
 	shake(3.0, 0.25)
 
 func collect_bonus_loot():
+	if not floor_bonus_collected:
+		floors_bonus_collected += 1
 	bonus_loot_collected  = true
 	floor_bonus_collected = true
-func add_gold(amount: int): gold_collected += amount
+
+func add_gold(amount: int) -> void:
+	var mult := 1.0
+	if has_relic("COIN_EFFIGY"):       mult *= 1.5
+	if has_passive("LVL_GOLD_BONUS"):  mult *= 1.25
+	gold_collected += int(float(amount) * mult)
 
 # ── Multi-floor ───────────────────────────────────────────────────────────────
 func save_player_weapon(w: String) -> void:
@@ -1169,6 +1382,9 @@ func save_player_gear(gear: Dictionary) -> void:
 
 func get_start_gear() -> Dictionary:
 	return floor_carry_gear.duplicate()
+
+func has_set_bonus(effect: String) -> bool:
+	return get_active_set_bonus(floor_carry_gear, floor_carry_weapon) == effect
 
 func has_gear_effect(effect: String) -> bool:
 	for slot in floor_carry_gear:
@@ -1199,24 +1415,9 @@ func get_start_equipped() -> Array[int]:
 	return []
 
 # ── End-of-run ────────────────────────────────────────────────────────────────
-func finish_run(success: bool):
-	if success:
-		runs_completed += 1
-		var order = ["", "ROGUE", "SELLSWORD", "SHADOWBLADE", "PHANTOM THIEF"]
-		if order.find(get_rating()) > order.find(best_rating):
-			best_rating = get_rating()
-		match get_rating():
-			"PHANTOM THIEF": guild_rep += 10
-			"SHADOWBLADE":   guild_rep += 7
-			"SELLSWORD":     guild_rep += 4
-			_:               guild_rep += 2
-	else:
-		guild_rep += 1
-	runs_attempted += 1
-	lifetime_gold += gold_collected - gold_spent
-	if success and times_alerted == 0:
-		ghost_runs += 1
-	save_persistent()
+# Stats (rep, gold, runs) are tracked by MetaProgress.record_run_complete() via HeistResult.
+func finish_run(_success: bool) -> void:
+	pass
 
 func _reset_run_state():
 	state                = State.PLAYING
@@ -1224,7 +1425,8 @@ func _reset_run_state():
 	takedowns            = 0
 	times_alerted        = 0
 	alert_escalation     = 0
-	bonus_loot_collected = false
+	bonus_loot_collected   = false
+	floors_bonus_collected = 0
 	gold_collected       = 0
 	gold_spent           = 0
 	current_floor        = 1
@@ -1234,12 +1436,17 @@ func _reset_run_state():
 	floor_carry_weapon   = "NONE"
 	floor_carry_gear     = { "boots": "", "cloak": "", "offhand": "", "trinket": "" }
 	active_passives.clear()
+	collected_relics.clear()
+	run_xp               = 0
+	run_level            = 0
 	floor_heat_level     = 0
 	floor_heat_accum     = 0.0
 	active_contract      = "NONE"
 	contract_name        = ""
 	contract_desc        = ""
 	contract_bonus       = 0
+	preheist_intel.clear()
+	preheist_entry       = "FRONT_DOOR"
 	wanted_level         = 0
 	_wanted_bribe_used   = false
 	player_is_bleeding   = false
@@ -1257,6 +1464,7 @@ func _reset_run_state():
 		"SHADOWDANCER": player_max_hp = 5
 		"CUTPURSE":     player_max_hp = 5
 		_:              player_max_hp = 6
+	_base_max_hp = player_max_hp
 	player_hp = player_max_hp
 
 func go_to_class_select():
@@ -1265,36 +1473,30 @@ func go_to_class_select():
 	quartermaster_name = QUARTERMASTERS[randi() % QUARTERMASTERS.size()]
 	get_tree().change_scene_to_file("res://ClassSelect.tscn")
 
+func go_to_guild_hq() -> void:
+	_reset_run_state()
+	_sync_from_meta()
+	quartermaster_name = QUARTERMASTERS[randi() % QUARTERMASTERS.size()]
+	get_tree().change_scene_to_file("res://scenes/GuildHQ.tscn")
+
+func go_to_preheist() -> void:
+	get_tree().change_scene_to_file("res://scenes/PreHeist.tscn")
+
+func go_to_result() -> void:
+	get_tree().change_scene_to_file("res://scenes/HeistResult.tscn")
+
 func restart():
 	finish_run(false)
 	_reset_run_state()
 	get_tree().change_scene_to_file("res://World.tscn")
 
 # ── Persistence ───────────────────────────────────────────────────────────────
-func load_persistent():
-	var cfg = ConfigFile.new()
-	if cfg.load(SAVE_PATH) != OK:
-		return
-	lifetime_gold      = cfg.get_value("stats", "lifetime_gold",      0)
-	runs_completed     = cfg.get_value("stats", "runs_completed",     0)
-	runs_attempted     = cfg.get_value("stats", "runs_attempted",     0)
-	best_rating        = cfg.get_value("stats", "best_rating",        "")
-	guild_rep          = cfg.get_value("stats", "guild_rep",          0)
-	lifetime_takedowns = cfg.get_value("stats", "lifetime_takedowns", 0)
-	lifetime_alerts    = cfg.get_value("stats", "lifetime_alerts",    0)
-	ghost_runs         = cfg.get_value("stats", "ghost_runs",         0)
+# Persistent stats are owned by MetaProgress — no save/load here.
+func load_persistent() -> void:
+	pass
 
-func save_persistent():
-	var cfg = ConfigFile.new()
-	cfg.set_value("stats", "lifetime_gold",      lifetime_gold)
-	cfg.set_value("stats", "runs_completed",     runs_completed)
-	cfg.set_value("stats", "runs_attempted",     runs_attempted)
-	cfg.set_value("stats", "best_rating",        best_rating)
-	cfg.set_value("stats", "guild_rep",          guild_rep)
-	cfg.set_value("stats", "lifetime_takedowns", lifetime_takedowns)
-	cfg.set_value("stats", "lifetime_alerts",    lifetime_alerts)
-	cfg.set_value("stats", "ghost_runs",         ghost_runs)
-	cfg.save(SAVE_PATH)
+func save_persistent() -> void:
+	pass
 
 # ── Rating / display ──────────────────────────────────────────────────────────
 func get_rating() -> String:
@@ -1345,6 +1547,9 @@ func reset_combo() -> void:
 
 func take_damage(amount: int = 2) -> bool:
 	reset_combo()
+	# SELLSWORD: battle-hardened takes 1 less damage (min 1)
+	if selected_class == "SELLSWORD":
+		amount = max(1, amount - 1)
 	player_hp = max(0, player_hp - amount)
 	shake(5.0, 0.35)
 	alert_triggered.emit()   # red flash

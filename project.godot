@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="contraband-prototype"
-run/main_scene="res://ClassSelect.tscn"
+run/main_scene="res://scenes/GuildHQ.tscn"
 config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
 
@@ -20,6 +20,11 @@ config/icon="res://icon.svg"
 GameManager="*res://GameManager.gd"
 AudioManager="*res://AudioManager.gd"
 LootSystem="*res://LootSystem.gd"
+WeaponDatabase="*res://data/WeaponDatabase.gd"
+ClassDatabase="*res://data/ClassDatabase.gd"
+MetaProgress="*res://systems/MetaProgress.gd"
+CombatSystem="*res://systems/CombatSystem.gd"
+StealthSystem="*res://systems/StealthSystem.gd"
 _mcp_game_helper="*res://addons/godot_ai/runtime/game_helper.gd"
 
 [editor_plugins]

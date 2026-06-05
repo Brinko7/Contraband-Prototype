@@ -94,6 +94,7 @@ func step_quiet():   _play("step_quiet",  -13.0)
 func step_loud():    _play("step_loud",    -5.0)
 func detect_tick():  _play("detect_tick", -10.0)
 func alert_blare():  _play("alert_blare",  -2.0)
+func noise_alert():  _play("alert_blare",   0.0)   # louder alarm bell clang
 func takedown():     _play("takedown",     -5.0)
 func coin_throw():   _play("coin",         -9.0)
 func smoke_pop():    _play("smoke",        -8.0)

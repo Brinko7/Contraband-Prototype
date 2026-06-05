@@ -15,6 +15,7 @@ const _civilian_script   := preload("res://CivilianNPC.gd")
 const _locked_door_script := preload("res://LockedDoor.gd")
 const _curtain_script     := preload("res://CurtainSpot.gd")
 const _fog_script        := preload("res://FogOfWar.gd")
+const _bell_script       := preload("res://AlarmBell.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _reinforcements_spawned := 0
@@ -32,19 +33,83 @@ var _reinforcements_spawned := 0
 # Player spawn: Vector2(384, 512) — col 24, row 32 (Entry Foyer centre)
 
 func _ready():
-	# 2:1 isometric projection — X goes right+down, Y goes left+down
-	transform = Transform2D(Vector2(1.0, 0.5), Vector2(-1.0, 0.5), Vector2.ZERO)
-
+	y_sort_enabled = true  # children render in Y order for 2.5D depth sorting
 	GameManager.pick_floor_complication()
 	GameManager.pick_floor_objective()
 	GameManager.start_floor_timer()
 	GameManager.alert_triggered.connect(_on_alert_triggered)
 	_rng.seed = GameManager.run_seed + GameManager.current_floor * 7919
 
-	# Spawn player in Entry Foyer centre
+	# Entry spawn position — varies by preheist entry selection
+	const ENTRY_SPAWNS: Dictionary = {
+		"FRONT_DOOR":  Vector2(384, 536), "SIDE_WINDOW": Vector2(560, 400),
+		"SEWER":       Vector2(200, 450), "GUARD_POST":  Vector2(384, 536),
+		"ROOF":        Vector2(384,  60), "SERVANT":     Vector2(480, 536),
+		"NOBLE_PARTY": Vector2(384, 500), "VAULT_SHAFT": Vector2(384,  56),
+		"SHADOW_ENTRY":Vector2(150, 400), "DIPLOMATIC":  Vector2(384, 536),
+		"WARD_BYPASS": Vector2(300, 200), "CHAOS":       Vector2(550, 510),
+		"TUNNEL":      Vector2(200, 510), "BOLD":        Vector2(384, 536),
+		"PHANTOM":     Vector2(150, 380),
+	}
+	var spawn_pos: Vector2 = ENTRY_SPAWNS.get(GameManager.preheist_entry, Vector2(384, 512))
 	var player_node := get_tree().get_first_node_in_group("player")
 	if player_node:
-		player_node.position = Vector2(384, 512)
+		player_node.position = spawn_pos
+		# SEWER/SHADOW_ENTRY/PHANTOM/TUNNEL — start crouched and undetected
+		if GameManager.preheist_entry in ["SEWER", "SHADOW_ENTRY", "PHANTOM", "TUNNEL"]:
+			player_node.set("is_sneaking", true)
+		# CHAOS — distract all entry-room guards (start them SUSPICIOUS in opposite direction)
+		if GameManager.preheist_entry == "CHAOS":
+			for guard in get_tree().get_nodes_in_group("guards"):
+				var to_player: Vector2 = spawn_pos - (guard as Node2D).global_position
+				if to_player.length() < 200.0:
+					# Turn guards away from player — face away from the entry
+					guard.set("facing", -to_player.normalized() if to_player.length() > 0 else Vector2(0, -1))
+					guard.set("alert_state", 1)    # SUSPICIOUS — drawn toward distraction
+					guard.set("de_escalate_timer", 8.0)
+		# NOBLE_PARTY — start with detection fill rate halved (player is disguised as a guest)
+		elif GameManager.preheist_entry == "NOBLE_PARTY":
+			player_node.set_meta("disguised", true)   # Guard.gd reads this to halve detection
+		# SERVANT — start with a coin in hand and one free item use
+		elif GameManager.preheist_entry == "SERVANT":
+			if player_node.has_method("add_item"):
+				player_node.call("add_item", 0, 2)  # ItemType.COIN = 0, count 2 (servant's cover)
+		# ROOF — all guards start looking down (away from roof entry direction)
+		elif GameManager.preheist_entry == "ROOF":
+			for guard in get_tree().get_nodes_in_group("guards"):
+				if guard.global_position.y < 200.0:   # only vault-level guards
+					guard.set("facing", Vector2(0, 1))  # looking down, not at roof entry
+		# DIPLOMATIC — start with reduced wanted level (credentials cleared one strike)
+		elif GameManager.preheist_entry == "DIPLOMATIC":
+			GameManager.wanted_level = maxi(0, GameManager.wanted_level - 1)
+		# BOLD — all nearby guards start ALERT (direct assault; player gets +50gp per takedown bonus)
+		elif GameManager.preheist_entry == "BOLD":
+			for guard in get_tree().get_nodes_in_group("guards"):
+				if guard.global_position.distance_to(spawn_pos) < 300.0:
+					guard.set("alert_state", 2)  # AlertState.ALERT
+					guard.set("_alert_target", spawn_pos)
+			GameManager.wanted_level = mini(5, GameManager.wanted_level + 1)
+		# VAULT_SHAFT — player starts crouched + first ward is auto-disabled
+		elif GameManager.preheist_entry == "VAULT_SHAFT":
+			player_node.set("is_sneaking", true)
+			for ward in get_tree().get_nodes_in_group("magic_wards"):
+				if ward.global_position.distance_to(spawn_pos) < 150.0:
+					if ward.has_method("destroy_ward"):
+						ward.destroy_ward()
+					break
+		# PHANTOM — player invisible for 3s on entry; detection doesn't build
+		elif GameManager.preheist_entry == "PHANTOM":
+			player_node.set("is_sneaking", true)
+			player_node.set_meta("phantom_entry_timer", 3.0)
+
+	# Apply purchased intel effects
+	if "patrol_schedule" in GameManager.preheist_intel:
+		for guard in get_tree().get_nodes_in_group("guards"):
+			guard.set("show_patrol_path", true)
+	if "guard_weakness" in GameManager.preheist_intel:
+		for guard in get_tree().get_nodes_in_group("guards"):
+			guard.set("show_stats", true)
+	# entry_map intel: FogOfWar._reveal_entry_room() handles this via call_deferred
 
 	var variant: int = _rng.randi() % 3
 	match GameManager.current_floor:
@@ -64,8 +129,14 @@ func _ready():
 			if variant == 0:   _setup_floor4()
 			elif variant == 1: _setup_floor4b()
 			else:              _setup_floor4c()
+		5:
+			if variant == 0:   _setup_floor5()
+			elif variant == 1: _setup_floor5b()
+			else:              _setup_floor5c()
 		_:
-			_setup_floor5()
+			if variant == 0:   _setup_floor6()
+			elif variant == 1: _setup_floor6b()
+			else:              _setup_floor6c()
 
 	# Optional side passage — 50% chance, adds a locked side room with elite guard + bonus loot
 	if _rng.randi() % 2 == 0:
@@ -75,12 +146,15 @@ func _ready():
 	_locked_door(Vector2(432, 112), 1)
 
 	_spawn_interactables()
+	_spawn_floor_relic()
 	_ensure_safe_spawn()
 	_apply_wanted_level_effects()
+	_spawn_archetype_guards()
 
-	# Fog-of-war overlay — added last so it draws above all game nodes
+	# Fog-of-war overlay — high z_index keeps it above all game nodes regardless of Y sort
 	var fog := Node2D.new()
 	fog.set_script(_fog_script)
+	fog.z_index = 100
 	add_child(fog)
 
 # ── Returns base ± jitter snapped to 16-px grid ───────────────────────────────
@@ -92,6 +166,15 @@ func _j(base: Vector2, rx: int = 1, ry: int = 1) -> Vector2:
 # ── Wanted level world consequences ──────────────────────────────────────────
 func _apply_wanted_level_effects():
 	var wl := GameManager.wanted_level
+	# Apply MetaProgress city heat — guards get harder proportional to persistent heat
+	var heat_bonus: int   = MetaProgress.get_heat_guard_bonus()
+	var heat_patrol: float = MetaProgress.get_heat_patrol_mult()
+	if heat_bonus > 0 or heat_patrol != 1.0:
+		for g in get_tree().get_nodes_in_group("guards"):
+			var iv: float = g.get("move_interval") if g.get("move_interval") else 0.40
+			g.set("move_interval", iv / heat_patrol)   # smaller interval = faster patrol
+			var vr: float = g.get("vision_range") if g.get("vision_range") else 80.0
+			g.set("vision_range", vr + heat_bonus * 8.0)
 	if wl <= 0:
 		return
 	# Wanted 1+: guards have slightly shorter patrol wait
@@ -151,11 +234,11 @@ func _setup_floor1():
 	var vr := 100.0; var va := 80.0
 
 	# Entry Foyer — sentry sweeps width + checks both corridor mouths; hound patrols a loop
-	_guard(_j(Vector2(384, 512)), [
-		_j(Vector2(256,512)), _j(Vector2(256,480)), _j(Vector2(304,464)),
-		_j(Vector2(496,464)), _j(Vector2(512,480)), _j(Vector2(512,512))],
+	_guard(_j(Vector2(384, 516)), [
+		_j(Vector2(224,516)), _j(Vector2(224,492)), _j(Vector2(272,484)),
+		_j(Vector2(496,484)), _j(Vector2(560,492)), _j(Vector2(560,516))],
 		"SENTRY", 75.0, 55.0, 0.42)
-	_hound(Vector2(384, 500), [_j(Vector2(272,496)), _j(Vector2(384,480)), _j(Vector2(496,496))])
+	_hound(Vector2(384, 500), [_j(Vector2(272,496)), _j(Vector2(384,492)), _j(Vector2(496,496))])
 
 	# Captain's Office — captain patrols room loop + peeks toward vault
 	var cap := _guard(_j(Vector2(144, 200)),
@@ -164,15 +247,16 @@ func _setup_floor1():
 		"CAPTAIN", 130.0, 100.0, 0.32)
 	cap.set("is_captain", true)
 	cap.set("key_id", 1)
-	# Watcher sweeps south wall + checks barracks corridor mouth
-	_guard(_j(Vector2(80, 168)), [
-		_j(Vector2(32,160)), _j(Vector2(240,160)), _j(Vector2(256,304)), _j(Vector2(32,304))],
+	# Watcher sweeps office south wall + dips into barracks passage
+	_guard(_j(Vector2(80, 200)), [
+		_j(Vector2(32,148)), _j(Vector2(240,148)), _j(Vector2(240,272)),
+		_j(Vector2(136,320)), _j(Vector2(32,272))],
 		"WATCHER", 95.0, 85.0, 0.88)
 
-	# Antechamber — sentry sweeps room + checks storeroom corridor mouth
-	_guard(_j(Vector2(456, 200)), [
-		_j(Vector2(336,160)), _j(Vector2(576,160)), _j(Vector2(576,248)),
-		_j(Vector2(480,304)), _j(Vector2(336,248))],
+	# Antechamber — sentry patrols the full antechamber width
+	_guard(_j(Vector2(408, 200)), [
+		_j(Vector2(320,148)), _j(Vector2(496,148)), _j(Vector2(500,260)),
+		_j(Vector2(320,260))],
 		"SENTRY", vr, va, 0.40)
 
 	# Barracks — foot soldier sweeps full room + checks entry corridor mouth
@@ -518,6 +602,9 @@ func _setup_floor3():
 		_spawn_weapon_pickup(_wdrops3[0], Vector2(144, 292))
 	if _wdrops3.size() >= 2:
 		_spawn_weapon_pickup(_wdrops3[1], Vector2(592, 292))
+	# Alarm bells — vault corridor and entry checkpoint
+	_bell(Vector2(320, 112))   # vault corridor mouth
+	_bell(Vector2(448, 480))   # entry checkpoint
 
 # ── Floor 3B ──────────────────────────────────────────────────────────────────
 func _setup_floor3b():
@@ -767,6 +854,10 @@ func _setup_floor4():
 		_spawn_weapon_pickup(_wdrops4[0], Vector2(144, 292))
 	if _wdrops4.size() >= 2:
 		_spawn_weapon_pickup(_wdrops4[1], Vector2(592, 292))
+	# Three alarm bells — vault, corridor split, entry arch
+	_bell(Vector2(320, 112))
+	_bell(Vector2(352, 272))
+	_bell(Vector2(384, 480))
 
 # ── Floor 4B ──────────────────────────────────────────────────────────────────
 func _setup_floor4b():
@@ -938,6 +1029,409 @@ func _setup_floor5():
 		_spawn_weapon_pickup(_wdrops5[0], Vector2(144, 292))
 	if _wdrops5.size() >= 2:
 		_spawn_weapon_pickup(_wdrops5[1], Vector2(592, 292))
+	# Four alarm bells — vault mouth, both corridors, entry
+	_bell(Vector2(320, 96))
+	_bell(Vector2(192, 272))
+	_bell(Vector2(560, 272))
+	_bell(Vector2(384, 480))
+
+# Floor 5 variant B — The Vault Siege: Boss holds the vault with a smaller, elite guard ring
+func _setup_floor5b():
+	var vr := 135.0; var va := 110.0
+
+	# Entry — lighter than 5a but still dangerous
+	_guard(_j(Vector2(352, 512)), [_j(Vector2(272,512)), _j(Vector2(432,512))], "WARDEN", vr, va, 0.30)
+	_guard(_j(Vector2(448, 496)), [_j(Vector2(384,496)), _j(Vector2(512,496))], "WARDEN", vr, va, 0.30)
+	_hound(Vector2(384, 480),  [_j(Vector2(240,480)), _j(Vector2(528,480))])
+	_gnoll(_j(Vector2(288, 540)), [_j(Vector2(224,540)), _j(Vector2(384,540))])
+	_gnoll(_j(Vector2(480, 540)), [_j(Vector2(384,540)), _j(Vector2(544,540))])
+
+	# Barracks — prowlers on tight circuit
+	_prowler(_j(Vector2(96,  368)), [_j(Vector2(48,336)),  _j(Vector2(160,368)), _j(Vector2(96,416))])
+	_prowler(_j(Vector2(240, 368)), [_j(Vector2(160,336)), _j(Vector2(288,400))])
+	_skeleton(_j(Vector2(48,  400)), [_j(Vector2(32,368)), _j(Vector2(96,416))])
+	_skeleton(_j(Vector2(256, 400)), [_j(Vector2(192,400)), _j(Vector2(288,416))])
+
+	# Storeroom — goblin pack
+	_goblin(_j(Vector2(544, 368)), [_j(Vector2(480,336)), _j(Vector2(608,400))])
+	_goblin(_j(Vector2(608, 368)), [_j(Vector2(544,336)), _j(Vector2(672,400))])
+	_goblin(_j(Vector2(576, 416)), [_j(Vector2(480,416)), _j(Vector2(672,400))])
+	_guard(_j(Vector2(704, 368)), [_j(Vector2(672,336)), _j(Vector2(720,416))], "WATCHER", vr, va, 0.50)
+
+	# Captain's Office — heavily trapped, prowler patrols
+	_prowler(_j(Vector2(80, 200)),  [_j(Vector2(32,168)), _j(Vector2(240,200)), _j(Vector2(80,248))])
+	_prowler(_j(Vector2(200, 168)), [_j(Vector2(48,168)), _j(Vector2(240,168))])
+	_guard(_j(Vector2(144, 216)),   [_j(Vector2(48,200)), _j(Vector2(240,200))], "WARDEN", vr, va, 0.60)
+	_gnoll(_j(Vector2(80, 248)),    [_j(Vector2(32,232)), _j(Vector2(144,248))])
+	_sentinel(Vector2(48, 168)); _sentinel(Vector2(240, 168))
+	_sentinel(Vector2(48, 248)); _sentinel(Vector2(240, 248))
+
+	# Antechamber — BOSS here (variant: boss has come forward with vault guard)
+	_boss(_j(Vector2(456, 200)),
+		[_j(Vector2(336,168)), _j(Vector2(576,168)), _j(Vector2(576,248)), _j(Vector2(336,248))])
+	_guard(_j(Vector2(360, 168)), [_j(Vector2(336,160)), _j(Vector2(408,168))], "WARDEN", vr, va, 0.35)
+	_guard(_j(Vector2(576, 168)), [_j(Vector2(544,160)), _j(Vector2(608,200))], "WARDEN", vr, va, 0.35)
+	_guard(_j(Vector2(360, 248)), [_j(Vector2(336,240)), _j(Vector2(408,248))], "WARDEN", vr, va, 0.35)
+	_guard(_j(Vector2(576, 248)), [_j(Vector2(544,240)), _j(Vector2(608,200))], "WARDEN", vr, va, 0.35)
+	_prowler(_j(Vector2(336, 200)), [_j(Vector2(336,168)), _j(Vector2(336,248))])
+	_gnoll(_j(Vector2(576, 216)),   [_j(Vector2(544,200)), _j(Vector2(608,232))])
+	_hound(Vector2(504, 168), [_j(Vector2(336,168)), _j(Vector2(576,168))])
+
+	# Vault — lighter with boss displaced but still two relics
+	_guard(_j(Vector2(256, 56)), [_j(Vector2(160,32)), _j(Vector2(352,32))], "WATCHER", vr, va, 0.35)
+	_guard(_j(Vector2(512, 56)), [_j(Vector2(416,32)), _j(Vector2(608,32))], "WATCHER", vr, va, 0.35)
+	_guard(_j(Vector2(384, 80)), [_j(Vector2(192,80)), _j(Vector2(576,80))], "WARDEN",  vr, va, 0.60)
+	_skeleton(_j(Vector2(192, 48)), [_j(Vector2(128,32)), _j(Vector2(256,64))])
+	_skeleton(_j(Vector2(576, 48)), [_j(Vector2(512,32)), _j(Vector2(640,64))])
+	_loot(Vector2(384, 32), 2000, false, 2)   # primary relic — now unguarded by boss
+	_loot(Vector2(192, 40), 700,  true,  2)
+	_loot(Vector2(576, 40), 900,  true,  2)
+
+	_trap(Vector2(80, 200)); _trap(Vector2(456, 200))
+	_trap(Vector2(80, 248)); _trap(Vector2(456, 248))
+	_trap(Vector2(144, 168)); _trap(Vector2(144, 248))
+	_ward(Vector2(80, 184)); _ward(Vector2(240, 184))
+	_ward(Vector2(456, 184)); _ward(Vector2(576, 184))
+	_glass(Vector2(144, 216)); _glass(Vector2(456, 216))
+	_glass(Vector2(80, 232));  _glass(Vector2(576, 232))
+	_oil(Vector2(32, 216)); _oil(Vector2(240, 216))
+	_oil(Vector2(32, 248)); _oil(Vector2(240, 248))
+	_civilian(Vector2(160, 376), [Vector2(48, 376), Vector2(272, 376)])
+	_civilian(Vector2(576, 376), [Vector2(464, 376), Vector2(688, 376)])
+	_civilian(Vector2(384, 420), [Vector2(240, 420), Vector2(528, 420)])
+	_pickup(Vector2(240, 56), 2); _pickup(Vector2(528, 56), 2)
+	_pickup(Vector2(256, 544), 1); _pickup(Vector2(512, 544), 1)
+	_pickup(Vector2(384, 540), 0)
+	var _wdrops5b := GameManager.get_floor_weapon_drops(5)
+	if _wdrops5b.size() >= 1:
+		_spawn_weapon_pickup(_wdrops5b[0], Vector2(144, 296))
+	if _wdrops5b.size() >= 2:
+		_spawn_weapon_pickup(_wdrops5b[1], Vector2(608, 296))
+	if _surge() or _escalated(2):
+		_prowler(_j(Vector2(240, 168)), [_j(Vector2(144,168)), _j(Vector2(240,248))])
+	if _bounty() or _escalated(3):
+		_hound(_j(Vector2(144, 216)), [_j(Vector2(32,200)), _j(Vector2(240,200))])
+
+# Floor 5 variant C — The Shadow Court: Dispersed stealth specialists, no retinue wall, boss
+# lurks in the darkened throne room flanked by prowlers and a web of sentinels + wards
+func _setup_floor5c():
+	var vr := 130.0; var va := 105.0
+
+	# Entry — gnoll pack; fewer wardens but tight hound net
+	_gnoll(_j(Vector2(320, 512)), [_j(Vector2(224,512)), _j(Vector2(416,512))])
+	_gnoll(_j(Vector2(448, 512)), [_j(Vector2(352,512)), _j(Vector2(544,512))])
+	_gnoll(_j(Vector2(384, 540)), [_j(Vector2(256,540)), _j(Vector2(512,540))])
+	_hound(Vector2(256, 480), [_j(Vector2(192,480)), _j(Vector2(352,480))])
+	_hound(Vector2(512, 480), [_j(Vector2(416,480)), _j(Vector2(608,480))])
+	_hound(Vector2(384, 496), [_j(Vector2(240,496)), _j(Vector2(528,496))])
+
+	# Mid corridor — prowlers weaving between ward lines
+	_prowler(_j(Vector2(384, 368)), [_j(Vector2(240,368)), _j(Vector2(528,368)), _j(Vector2(384,416))])
+	_prowler(_j(Vector2(176, 400)), [_j(Vector2(112,368)), _j(Vector2(240,416))])
+	_prowler(_j(Vector2(592, 400)), [_j(Vector2(528,368)), _j(Vector2(656,416))])
+	_skeleton(_j(Vector2(112, 368)), [_j(Vector2(48,352)), _j(Vector2(176,384))])
+	_skeleton(_j(Vector2(656, 368)), [_j(Vector2(592,352)), _j(Vector2(720,384))])
+
+	# Antechamber — goblin scouts + sentinel tripwire web
+	_goblin(_j(Vector2(384, 248)), [_j(Vector2(288,248)), _j(Vector2(480,248))])
+	_goblin(_j(Vector2(272, 216)), [_j(Vector2(192,200)), _j(Vector2(336,248))])
+	_goblin(_j(Vector2(496, 216)), [_j(Vector2(432,200)), _j(Vector2(576,248))])
+	_guard(_j(Vector2(192, 168)), [_j(Vector2(144,144)), _j(Vector2(240,200))], "WATCHER", vr, va, 0.40)
+	_guard(_j(Vector2(576, 168)), [_j(Vector2(528,144)), _j(Vector2(624,200))], "WATCHER", vr, va, 0.40)
+	_sentinel(Vector2(288, 168)); _sentinel(Vector2(480, 168))
+	_sentinel(Vector2(288, 248)); _sentinel(Vector2(480, 248))
+	_sentinel(Vector2(192, 216)); _sentinel(Vector2(576, 216))
+
+	# Throne Room — BOSS hidden deep; prowler guards and no retinue wall
+	_boss(_j(Vector2(384, 56)),
+		[_j(Vector2(240,32)), _j(Vector2(528,32)), _j(Vector2(528,80)), _j(Vector2(240,80))])
+	_prowler(_j(Vector2(192, 80)),  [_j(Vector2(144,32)), _j(Vector2(240,80)), _j(Vector2(192,128))])
+	_prowler(_j(Vector2(576, 80)),  [_j(Vector2(528,32)), _j(Vector2(624,80)), _j(Vector2(576,128))])
+	_prowler(_j(Vector2(384, 80)),  [_j(Vector2(288,64)), _j(Vector2(480,64))])
+	_guard(_j(Vector2(240, 56)),  [_j(Vector2(192,32)), _j(Vector2(288,80))], "WARDEN", vr, va, 0.55)
+	_guard(_j(Vector2(528, 56)),  [_j(Vector2(480,32)), _j(Vector2(576,80))], "WARDEN", vr, va, 0.55)
+	_gnoll(_j(Vector2(288, 80)),  [_j(Vector2(240,64)), _j(Vector2(336,80))])
+	_gnoll(_j(Vector2(480, 80)),  [_j(Vector2(432,64)), _j(Vector2(528,80))])
+
+	# Three relics — primary on the throne, two flanking
+	_loot(Vector2(384, 32), 1800, false, 2)   # primary — throne relic
+	_loot(Vector2(192, 40), 750, true, 2)
+	_loot(Vector2(576, 40), 950, true, 2)
+
+	# Dense hazard web — wards gate every corridor, oil + glass punish noise
+	_ward(Vector2(288, 168)); _ward(Vector2(480, 168))
+	_ward(Vector2(192, 248)); _ward(Vector2(576, 248))
+	_ward(Vector2(288, 80));  _ward(Vector2(480, 80))
+	_ward(Vector2(192, 56));  _ward(Vector2(576, 56))
+	_trap(Vector2(384, 216)); _trap(Vector2(192, 216)); _trap(Vector2(576, 216))
+	_trap(Vector2(384, 368)); _trap(Vector2(176, 400)); _trap(Vector2(592, 400))
+	_glass(Vector2(336, 248)); _glass(Vector2(432, 248))
+	_glass(Vector2(192, 200)); _glass(Vector2(576, 200))
+	_glass(Vector2(240, 80));  _glass(Vector2(528, 80))
+	_oil(Vector2(144, 248)); _oil(Vector2(624, 248))
+	_oil(Vector2(144, 80));  _oil(Vector2(624, 80))
+
+	# Civilians huddled near entry — witnesses if combat erupts
+	_civilian(Vector2(112, 420), [Vector2(48, 420), Vector2(240, 420)])
+	_civilian(Vector2(656, 420), [Vector2(528, 420), Vector2(720, 420)])
+	_civilian(Vector2(384, 296), [Vector2(256, 296), Vector2(512, 296)])
+
+	_pickup(Vector2(240, 56), 2); _pickup(Vector2(528, 56), 2)
+	_pickup(Vector2(256, 544), 1); _pickup(Vector2(512, 544), 1)
+	_pickup(Vector2(384, 540), 0)
+
+	var _wdrops5c := GameManager.get_floor_weapon_drops(5)
+	if _wdrops5c.size() >= 1:
+		_spawn_weapon_pickup(_wdrops5c[0], Vector2(144, 296))
+	if _wdrops5c.size() >= 2:
+		_spawn_weapon_pickup(_wdrops5c[1], Vector2(608, 296))
+
+	if _surge() or _escalated(2):
+		_hound(_j(Vector2(384, 216)), [_j(Vector2(288,216)), _j(Vector2(480,216))])
+	if _bounty() or _escalated(3):
+		_guard(_j(Vector2(384, 128)), [_j(Vector2(288,128)), _j(Vector2(480,128))], "ELITE", vr + 20.0, va + 15.0, 0.55)
+
+# ── Floor 6 — The Citadel ─────────────────────────────────────────────────────
+func _setup_floor6():
+	var vr := 150.0; var va := 130.0
+
+	# Entry — the full garrison; no weak links
+	_guard(_j(Vector2(320, 512)), [_j(Vector2(224,512)), _j(Vector2(416,512))], "WARDEN", vr, va, 0.26)
+	_guard(_j(Vector2(448, 512)), [_j(Vector2(352,512)), _j(Vector2(544,512))], "WARDEN", vr, va, 0.26)
+	_guard(_j(Vector2(384, 496)), [_j(Vector2(256,496)), _j(Vector2(512,496))], "WARDEN", vr, va, 0.26)
+	_hound(Vector2(256, 480),  [_j(Vector2(192,480)), _j(Vector2(352,480))])
+	_hound(Vector2(512, 480),  [_j(Vector2(416,480)), _j(Vector2(608,480))])
+	_gnoll(_j(Vector2(288, 544)), [_j(Vector2(224,544)), _j(Vector2(384,544))])
+	_gnoll(_j(Vector2(480, 544)), [_j(Vector2(384,544)), _j(Vector2(544,544))])
+
+	# Mid — prowler vanguard; captain covers corridor
+	_prowler(_j(Vector2(384, 368)), [_j(Vector2(240,368)), _j(Vector2(528,368)), _j(Vector2(384,416))])
+	_prowler(_j(Vector2(192, 384)), [_j(Vector2(144,352)), _j(Vector2(240,416))])
+	_prowler(_j(Vector2(576, 384)), [_j(Vector2(528,352)), _j(Vector2(656,416))])
+	_captain(_j(Vector2(384, 320)), [_j(Vector2(256,320)), _j(Vector2(512,320)), _j(Vector2(512,416)), _j(Vector2(256,416))])
+
+	# Antechamber — sentinel grid; goblins on tripwires
+	_goblin(_j(Vector2(288, 248)), [_j(Vector2(224,248)), _j(Vector2(352,248))])
+	_goblin(_j(Vector2(480, 248)), [_j(Vector2(416,248)), _j(Vector2(544,248))])
+	_skeleton(_j(Vector2(144, 200)), [_j(Vector2(96,160)), _j(Vector2(192,240))])
+	_skeleton(_j(Vector2(624, 200)), [_j(Vector2(576,160)), _j(Vector2(672,240))])
+	_sentinel(Vector2(240, 168)); _sentinel(Vector2(528, 168))
+	_sentinel(Vector2(288, 248)); _sentinel(Vector2(480, 248))
+	_sentinel(Vector2(384, 200))
+
+	# Inner Sanctum — BOSS + full retinue; two captains flank
+	_boss(_j(Vector2(384, 48)),
+		[_j(Vector2(288,32)), _j(Vector2(480,32)), _j(Vector2(480,80)), _j(Vector2(288,80))])
+	_captain(_j(Vector2(224, 80)),
+		[_j(Vector2(160,48)), _j(Vector2(288,80)), _j(Vector2(224,128))])
+	_captain(_j(Vector2(544, 80)),
+		[_j(Vector2(480,48)), _j(Vector2(608,80)), _j(Vector2(544,128))])
+	_prowler(_j(Vector2(384, 80)),  [_j(Vector2(288,64)), _j(Vector2(480,64)), _j(Vector2(384,112))])
+	_guard(_j(Vector2(288, 56)),  [_j(Vector2(240,32)), _j(Vector2(336,80))], "ELITE", vr + 10, va + 10, 0.50)
+	_guard(_j(Vector2(480, 56)),  [_j(Vector2(432,32)), _j(Vector2(528,80))], "ELITE", vr + 10, va + 10, 0.50)
+
+	# Grand vault — maximum haul
+	_loot(Vector2(384, 32), 2500, false, 2)
+	_loot(Vector2(160, 40), 900, true, 2)
+	_loot(Vector2(608, 40), 900, true, 2)
+	_loot(Vector2(288, 56), 600, true, 1)
+	_loot(Vector2(480, 56), 600, true, 1)
+
+	# Hazard grid — maximum density
+	_ward(Vector2(240, 168)); _ward(Vector2(528, 168))
+	_ward(Vector2(384, 200)); _ward(Vector2(288, 248)); _ward(Vector2(480, 248))
+	_ward(Vector2(224, 80));  _ward(Vector2(544, 80))
+	_ward(Vector2(288, 48));  _ward(Vector2(480, 48))
+	_trap(Vector2(384, 320)); _trap(Vector2(192, 384)); _trap(Vector2(576, 384))
+	_trap(Vector2(288, 248)); _trap(Vector2(480, 248))
+	_trap(Vector2(288, 80));  _trap(Vector2(480, 80))
+	_glass(Vector2(336, 248)); _glass(Vector2(432, 248))
+	_glass(Vector2(240, 80));  _glass(Vector2(528, 80))
+	_glass(Vector2(288, 32));  _glass(Vector2(480, 32))
+	_oil(Vector2(144, 248)); _oil(Vector2(624, 248))
+	_oil(Vector2(144, 80));  _oil(Vector2(624, 80))
+	_oil(Vector2(384, 128))
+
+	# Alarm bells everywhere
+	_bell(Vector2(320, 96));   _bell(Vector2(448, 96))
+	_bell(Vector2(192, 272));  _bell(Vector2(576, 272))
+	_bell(Vector2(384, 368));  _bell(Vector2(384, 480))
+
+	_civilian(Vector2(384, 296), [Vector2(256, 296), Vector2(512, 296)])
+	_pickup(Vector2(240, 56), 2); _pickup(Vector2(528, 56), 2)
+	_pickup(Vector2(256, 544), 1); _pickup(Vector2(512, 544), 1)
+
+	var _wdrops6 := GameManager.get_floor_weapon_drops(6)
+	if _wdrops6.size() >= 1:
+		_spawn_weapon_pickup(_wdrops6[0], Vector2(144, 296))
+	if _wdrops6.size() >= 2:
+		_spawn_weapon_pickup(_wdrops6[1], Vector2(608, 296))
+	if _surge() or _escalated(2):
+		_hound(_j(Vector2(384, 212)), [_j(Vector2(288,212)), _j(Vector2(480,212))])
+	if _bounty() or _escalated(4):
+		_captain(_j(Vector2(384, 448)), [_j(Vector2(256,448)), _j(Vector2(512,448))])
+
+func _setup_floor6b():
+	# Floor 6 variant B — The Iron Vault: Fewer captains, more sentinels and skeleton patrols
+	var vr := 148.0; var va := 125.0
+
+	# Entry — skeleton wall
+	_skeleton(_j(Vector2(320, 512)), [_j(Vector2(224,512)), _j(Vector2(416,512))])
+	_skeleton(_j(Vector2(448, 512)), [_j(Vector2(352,512)), _j(Vector2(544,512))])
+	_skeleton(_j(Vector2(384, 496)), [_j(Vector2(256,496)), _j(Vector2(512,496))])
+	_hound(Vector2(256, 480),  [_j(Vector2(192,480)), _j(Vector2(352,480))])
+	_hound(Vector2(512, 480),  [_j(Vector2(416,480)), _j(Vector2(608,480))])
+	_gnoll(_j(Vector2(288, 544)), [_j(Vector2(224,544)), _j(Vector2(384,544))])
+	_gnoll(_j(Vector2(480, 544)), [_j(Vector2(384,544)), _j(Vector2(544,544))])
+
+	# Mid — sentinel maze with interlocking arcs
+	_sentinel(Vector2(192, 368)); _sentinel(Vector2(384, 368)); _sentinel(Vector2(576, 368))
+	_sentinel(Vector2(288, 416)); _sentinel(Vector2(480, 416))
+	_prowler(_j(Vector2(144, 352)), [_j(Vector2(96,320)), _j(Vector2(192,384))])
+	_prowler(_j(Vector2(624, 352)), [_j(Vector2(576,320)), _j(Vector2(672,384))])
+	_goblin(_j(Vector2(384, 416)), [_j(Vector2(288,416)), _j(Vector2(480,416))])
+
+	# Antechamber — captain pair + warden ring
+	_captain(_j(Vector2(240, 200)),
+		[_j(Vector2(160,160)), _j(Vector2(320,240))])
+	_captain(_j(Vector2(528, 200)),
+		[_j(Vector2(448,160)), _j(Vector2(608,240))])
+	_skeleton(_j(Vector2(384, 248)), [_j(Vector2(288,248)), _j(Vector2(480,248))])
+	_sentinel(Vector2(288, 168)); _sentinel(Vector2(480, 168))
+	_sentinel(Vector2(384, 200))
+
+	# Boss chamber — prowler guard ring around vault
+	_boss(_j(Vector2(384, 48)),
+		[_j(Vector2(288,32)), _j(Vector2(480,32)), _j(Vector2(480,80)), _j(Vector2(288,80))])
+	_prowler(_j(Vector2(224, 64)),  [_j(Vector2(160,32)), _j(Vector2(288,80))])
+	_prowler(_j(Vector2(544, 64)),  [_j(Vector2(480,32)), _j(Vector2(608,80))])
+	_prowler(_j(Vector2(384, 80)),  [_j(Vector2(288,64)), _j(Vector2(480,64))])
+	_prowler(_j(Vector2(288, 112)), [_j(Vector2(224,96)), _j(Vector2(352,128))])
+	_prowler(_j(Vector2(480, 112)), [_j(Vector2(416,96)), _j(Vector2(544,128))])
+	_guard(_j(Vector2(384, 112)), [_j(Vector2(304,96)), _j(Vector2(464,96))], "WARDEN", vr, va, 0.45)
+
+	_loot(Vector2(384, 32), 2500, false, 2)
+	_loot(Vector2(176, 40), 850, true, 2)
+	_loot(Vector2(592, 40), 850, true, 2)
+
+	_ward(Vector2(288, 168)); _ward(Vector2(480, 168))
+	_ward(Vector2(384, 200)); _ward(Vector2(192, 368)); _ward(Vector2(576, 368))
+	_ward(Vector2(288, 80));  _ward(Vector2(480, 80))
+	_trap(Vector2(384, 368)); _trap(Vector2(288, 416)); _trap(Vector2(480, 416))
+	_trap(Vector2(288, 80));  _trap(Vector2(480, 80))
+	_glass(Vector2(336, 248)); _glass(Vector2(432, 248))
+	_glass(Vector2(288, 32));  _glass(Vector2(480, 32))
+	_oil(Vector2(144, 248)); _oil(Vector2(624, 248))
+	_oil(Vector2(144, 80));  _oil(Vector2(624, 80))
+
+	_bell(Vector2(320, 96));   _bell(Vector2(448, 96))
+	_bell(Vector2(192, 368));  _bell(Vector2(576, 368))
+	_bell(Vector2(384, 480))
+
+	_pickup(Vector2(240, 56), 2); _pickup(Vector2(528, 56), 2)
+	_pickup(Vector2(256, 544), 1); _pickup(Vector2(512, 544), 1)
+	var _wdrops6b := GameManager.get_floor_weapon_drops(6)
+	if _wdrops6b.size() >= 1:
+		_spawn_weapon_pickup(_wdrops6b[0], Vector2(144, 296))
+	if _wdrops6b.size() >= 2:
+		_spawn_weapon_pickup(_wdrops6b[1], Vector2(608, 296))
+	if _surge() or _escalated(2):
+		_gnoll(_j(Vector2(384, 368)), [_j(Vector2(288,368)), _j(Vector2(480,368))])
+
+func _setup_floor6c():
+	# Floor 6 variant C — Siege Protocol: All guards pre-alert; no patrols, pure static
+	var vr := 145.0; var va := 120.0
+
+	# Entry — gnolls and hounds in a killzone
+	_gnoll(_j(Vector2(288, 512)), [_j(Vector2(224,512)), _j(Vector2(384,512))])
+	_gnoll(_j(Vector2(480, 512)), [_j(Vector2(384,512)), _j(Vector2(544,512))])
+	_gnoll(_j(Vector2(384, 540)), [_j(Vector2(256,540)), _j(Vector2(512,540))])
+	_hound(Vector2(224, 480), [_j(Vector2(160,480)), _j(Vector2(320,480))])
+	_hound(Vector2(544, 480), [_j(Vector2(448,480)), _j(Vector2(608,480))])
+	_hound(Vector2(384, 496), [_j(Vector2(256,496)), _j(Vector2(512,496))])
+	_hound(Vector2(384, 464), [_j(Vector2(288,464)), _j(Vector2(480,464))])
+
+	# Mid corridor — prowler + captain ambush
+	_prowler(_j(Vector2(192, 368)), [_j(Vector2(144,320)), _j(Vector2(240,416))])
+	_prowler(_j(Vector2(576, 368)), [_j(Vector2(528,320)), _j(Vector2(624,416))])
+	_prowler(_j(Vector2(384, 400)), [_j(Vector2(288,384)), _j(Vector2(480,384)), _j(Vector2(384,448))])
+	_captain(_j(Vector2(384, 320)), [_j(Vector2(256,320)), _j(Vector2(512,320)), _j(Vector2(384,368))])
+	_captain(_j(Vector2(176, 320)), [_j(Vector2(128,288)), _j(Vector2(240,352))])
+	_captain(_j(Vector2(592, 320)), [_j(Vector2(544,288)), _j(Vector2(640,352))])
+
+	# Antechamber — everything; sentinels, goblins, skeletons
+	_goblin(_j(Vector2(288, 248)), [_j(Vector2(224,248)), _j(Vector2(352,248))])
+	_goblin(_j(Vector2(480, 248)), [_j(Vector2(416,248)), _j(Vector2(544,248))])
+	_goblin(_j(Vector2(384, 216)), [_j(Vector2(320,200)), _j(Vector2(448,200))])
+	_skeleton(_j(Vector2(144, 200)), [_j(Vector2(96,160)), _j(Vector2(192,240))])
+	_skeleton(_j(Vector2(624, 200)), [_j(Vector2(576,160)), _j(Vector2(672,240))])
+	_sentinel(Vector2(240, 168)); _sentinel(Vector2(528, 168))
+	_sentinel(Vector2(192, 248)); _sentinel(Vector2(576, 248))
+	_sentinel(Vector2(384, 168))
+
+	# Boss — solo in the deepest sanctum, heavily warded
+	_boss(_j(Vector2(384, 48)),
+		[_j(Vector2(240,32)), _j(Vector2(528,32)), _j(Vector2(528,80)), _j(Vector2(240,80))])
+	_captain(_j(Vector2(240, 80)),
+		[_j(Vector2(176,48)), _j(Vector2(304,96))])
+	_captain(_j(Vector2(528, 80)),
+		[_j(Vector2(464,48)), _j(Vector2(592,96))])
+	_guard(_j(Vector2(384, 80)),  [_j(Vector2(288,64)), _j(Vector2(480,64))], "ELITE", vr + 15, va + 15, 0.48)
+
+	# Loot
+	_loot(Vector2(384, 32), 2800, false, 2)
+	_loot(Vector2(192, 40), 1000, true, 2)
+	_loot(Vector2(576, 40), 1000, true, 2)
+
+	# Max hazards
+	_ward(Vector2(240, 168)); _ward(Vector2(528, 168))
+	_ward(Vector2(384, 168)); _ward(Vector2(192, 248)); _ward(Vector2(576, 248))
+	_ward(Vector2(240, 80));  _ward(Vector2(528, 80))
+	_ward(Vector2(288, 48));  _ward(Vector2(480, 48))
+	_trap(Vector2(384, 320)); _trap(Vector2(176, 320)); _trap(Vector2(592, 320))
+	_trap(Vector2(288, 248)); _trap(Vector2(480, 248)); _trap(Vector2(384, 216))
+	_trap(Vector2(288, 80));  _trap(Vector2(480, 80))
+	_glass(Vector2(336, 248)); _glass(Vector2(432, 248))
+	_glass(Vector2(240, 80));  _glass(Vector2(528, 80))
+	_glass(Vector2(288, 32));  _glass(Vector2(480, 32))
+	_oil(Vector2(144, 248)); _oil(Vector2(624, 248))
+	_oil(Vector2(144, 80));  _oil(Vector2(624, 80))
+
+	# Six alarm bells — the densest alarm network
+	_bell(Vector2(320, 96));   _bell(Vector2(448, 96))
+	_bell(Vector2(192, 272));  _bell(Vector2(576, 272))
+	_bell(Vector2(192, 368));  _bell(Vector2(576, 368))
+	_bell(Vector2(384, 480))
+
+	# Pre-alert the entire garrison
+	for g in get_tree().get_nodes_in_group("guards"):
+		g.set("alert_state", 1)
+		g.set("de_escalate_timer", 99.0)
+
+	_pickup(Vector2(240, 56), 2); _pickup(Vector2(528, 56), 2)
+	_pickup(Vector2(256, 544), 1); _pickup(Vector2(512, 544), 1)
+	var _wdrops6c := GameManager.get_floor_weapon_drops(6)
+	if _wdrops6c.size() >= 1:
+		_spawn_weapon_pickup(_wdrops6c[0], Vector2(144, 296))
+	if _wdrops6c.size() >= 2:
+		_spawn_weapon_pickup(_wdrops6c[1], Vector2(608, 296))
+
+# ── V10 Archetype guard spawning (floors 3+) ─────────────────────────────────
+func _spawn_archetype_guards() -> void:
+	var floor := GameManager.current_floor
+	# Floor 3+: one INQUISITOR in vault area
+	if floor >= 3:
+		_inquisitor(Vector2(480, 56), [Vector2(336, 32), Vector2(608, 32), Vector2(608, 80), Vector2(336, 80)])
+	# Floor 4+: BRUTE in antechamber
+	if floor >= 4:
+		_brute(Vector2(408, 200), [Vector2(336, 160), Vector2(496, 160), Vector2(496, 256), Vector2(336, 256)])
+	# Floor 5+: HEX_CASTER in captain's office area
+	if floor >= 5:
+		_hex_caster(Vector2(144, 240), [Vector2(48, 240), Vector2(240, 240)])
+	# Floor 6: second INQUISITOR + HEX_CASTER in foyer
+	if floor >= 6:
+		_inquisitor(Vector2(304, 512), [Vector2(256, 496), Vector2(384, 512)])
+		_hex_caster(Vector2(464, 512), [Vector2(384, 512), Vector2(512, 496)])
 
 # ── Optional side passage — elite guard + bonus loot ─────────────────────────
 func _spawn_side_passage():
@@ -1012,6 +1506,11 @@ func _spawn_reinforcement(wave: int):
 		g.set("alert_state", 1)
 		g.set("de_escalate_timer", 10.0)
 		g.set("investigate_pos", Vector2(384, 200))
+		# Propagate intel effects to newly spawned reinforcement
+		if "patrol_schedule" in GameManager.preheist_intel:
+			g.set("show_patrol_path", true)
+		if "guard_weakness" in GameManager.preheist_intel:
+			g.set("show_stats", true)
 	GameManager.shake(2.5, 0.22)
 	GameManager.reinforcement_incoming.emit()
 
@@ -1039,10 +1538,15 @@ func _guard(pos: Vector2, patrol: Array, label: String,
 	add_child(g)
 	return g
 
+func _captain(pos: Vector2, patrol: Array, vrange := 135.0, vangle := 110.0) -> Node:
+	var g := _guard(pos, patrol, "CAPTAIN", vrange, vangle, 0.30)
+	g.set("is_captain", true)
+	return g
+
 func _sentinel(pos: Vector2) -> Node:
 	var g := GuardScene.instantiate()
 	g.position = pos
-	g.patrol_points = []
+	g.patrol_points = Array([], TYPE_VECTOR2, &"", null)
 	g.guard_label   = "SENTINEL"
 	g.vision_range  = 90.0
 	g.vision_angle  = 120.0
@@ -1121,6 +1625,62 @@ func _hound(pos: Vector2, patrol: Array) -> Node:
 	h.patrol_points = typed
 	add_child(h)
 	return h
+
+func _bell(pos: Vector2) -> Node:
+	var b := Node2D.new()
+	b.set_script(_bell_script)
+	b.position = pos
+	add_child(b)
+	return b
+
+# ── V10 Relic chest spawn ───────────────────────────────────────────────────
+const _relic_script := preload("res://RelicPickup.gd")
+
+func _spawn_relic(pos: Vector2, relic_id: String) -> Node:
+	var r := Area2D.new()
+	r.set_script(_relic_script)
+	r.position = pos
+	var col := CollisionShape2D.new()
+	var shape := CircleShape2D.new()
+	shape.radius = 14.0
+	col.shape = shape
+	r.add_child(col)
+	r.body_entered.connect(r._on_body_entered)
+	add_child(r)
+	r.call("setup", relic_id)
+	return r
+
+func _spawn_floor_relic() -> void:
+	# Choose a relic the player doesn't have yet; prefer rarity 1, then 2, then 3
+	var pool: Array = []
+	for rd in GameManager.RELICS:
+		if not GameManager.has_relic(rd.id):
+			pool.append(rd)
+	if pool.is_empty():
+		return
+	pool.sort_custom(func(a, b): return a.rarity < b.rarity)
+	# Pick from lowest-rarity available with some randomness
+	var eligible: Array = pool.filter(func(x): return x.rarity == pool[0].rarity)
+	var chosen: Dictionary = eligible[_rng.randi() % eligible.size()]
+	# Spawn at vault loot alcove (always in accessible area)
+	var pos := Vector2(192.0 + _rng.randi_range(0, 3) * 16.0, 48.0)
+	_spawn_relic(pos, chosen.id)
+
+# ── V10 New guard archetype helpers ────────────────────────────────────────
+func _inquisitor(pos: Vector2, patrol: Array) -> Node:
+	var g := _guard(pos, patrol, "INQUISITOR", 90.0, 90.0, 0.35)
+	g.set("is_inquisitor", true)
+	return g
+
+func _brute(pos: Vector2, patrol: Array) -> Node:
+	var g := _guard(pos, patrol, "BRUTE", 75.0, 65.0, 0.50)
+	g.set("is_brute", true)
+	return g
+
+func _hex_caster(pos: Vector2, patrol: Array) -> Node:
+	var g := _guard(pos, patrol, "HEX CASTER", 85.0, 70.0, 0.45)
+	g.set("is_hex_caster", true)
+	return g
 
 func _loot(pos: Vector2, value: int, is_bonus := false, rarity := 0) -> Node:
 	var l := LootScene.instantiate()

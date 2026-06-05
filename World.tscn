@@ -14,6 +14,7 @@ position = Vector2(0, 0)
 script = ExtResource("2_world")
 
 [node name="LevelMap" type="Node2D" parent="."]
+z_index = -10
 script = ExtResource("3_levelmap")
 
 [node name="CharacterBody2D" type="CharacterBody2D" parent="." groups=["player"]]

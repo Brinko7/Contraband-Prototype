@@ -24,8 +24,8 @@ func _on_player_step(player):
 	# GLASS_IMMUNE (Ironshod Boots): don't shatter
 	if GameManager.has_gear_effect("GLASS_IMMUNE"):
 		return
-	# IRON set bonus: no effect
-	if GameManager.has_gear_effect("SET_IRON"):
+	# IRON set bonus: body discovery window extended — also immune to glass shatter
+	if GameManager.has_set_bonus("SET_IRON"):
 		return
 	if not _triggered:
 		_triggered = true

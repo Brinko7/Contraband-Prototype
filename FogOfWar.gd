@@ -19,6 +19,15 @@ const ROOM_TILE_RECTS: Array[Rect2i] = [
 
 func _ready():
 	z_index = 10
+	if "entry_map" in GameManager.preheist_intel:
+		call_deferred("_reveal_entry_room")
+
+func _reveal_entry_room():
+	var lmap := get_tree().get_first_node_in_group("levelmap")
+	if lmap:
+		var visited: Array = lmap.get("visited_rooms")
+		if visited and visited.size() > 0:
+			visited[0] = true  # Entry Foyer always revealed with entry_map intel
 
 func _process(_delta):
 	queue_redraw()

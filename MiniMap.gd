@@ -118,6 +118,12 @@ func _draw():
 			draw_string(font, r.get_center() + Vector2(-3, 3), "✓",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.35, 0.95, 0.45, 0.80))
 
+		# vault_location intel: mark Vault (room 5) with a gold star regardless of visit state
+		if i == 5 and "vault_location" in GameManager.preheist_intel:
+			draw_string(font, r.get_center() + Vector2(-4, 4), "★",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(1.0, 0.85, 0.20, 0.95))
+			draw_rect(r, Color(0.85, 0.70, 0.15, 0.18), true)
+
 	# Pebble cooldown indicator (bottom strip)
 	var player_node = get_meta("player", null)
 	if player_node:

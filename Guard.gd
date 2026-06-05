@@ -21,6 +21,23 @@ var _sprite: Sprite2D
 @export var is_boss       := false
 @export var enemy_type: EnemyType = EnemyType.HUMAN
 
+# ── V10 Guard archetype flags ─────────────────────────────────────────────────
+# INQUISITOR: sees through shadow; detects player even when not lit
+@export var is_inquisitor  := false
+# BRUTE: 3 HP, slower, deals 2 damage on catch
+@export var is_brute       := false
+# HEX_CASTER: fires magic bolt toward last known position; wards nearby tiles
+@export var is_hex_caster  := false
+
+# HEX_CASTER bolt state
+var _hex_charge_t  := 0.0
+var _hex_fire_t    := 0.0
+const HEX_CHARGE_TIME := 2.5   # seconds before bolt fires
+const HEX_BOLT_SPEED  := 120.0
+var _hex_bolt_pos  := Vector2.ZERO
+var _hex_bolt_dir  := Vector2.ZERO
+var _hex_bolt_live := false
+
 @export var patrol_points: Array[Vector2] = []
 
 var _is_held      := false   # Hold Person spell
@@ -79,12 +96,36 @@ var guard_max_hp: int = 2
 var _hurt_flash_t:   float   = 0.0
 var _knockback_dir:  Vector2 = Vector2.ZERO
 var _knockback_t:    float   = 0.0
+var _knockback_dur_cur: float = 0.14
+var _knockback_px_cur:  float = 6.0
 const _KNOCKBACK_DUR: float  = 0.14
 const _KNOCKBACK_PX:  float  = 6.0
+var _kill_dir:       Vector2 = Vector2.ZERO   # direction of fatal/latest hit
+var _draw_offset:    Vector2 = Vector2.ZERO   # visual knockback offset (applied in _draw)
+var _hitstop_t:      float   = 0.0            # brief freeze on hit for impact feel
+
+# Per-weapon knockback feel: px = slide distance, dur = slide time, hitstop = freeze frames
+const _WEAPON_KNOCKBACK: Dictionary = {
+	"LONGSWORD":      {"px": 10.0, "dur": 0.22, "hitstop": 0.06, "shake": 2.5},
+	"BROADSWORD":     {"px": 14.0, "dur": 0.28, "hitstop": 0.10, "shake": 4.0},
+	"BLADESONG":      {"px":  7.0, "dur": 0.18, "hitstop": 0.05, "shake": 2.0},
+	"WAR_PICK":       {"px":  9.0, "dur": 0.20, "hitstop": 0.08, "shake": 3.0},
+	"SHIV":           {"px":  3.0, "dur": 0.10, "hitstop": 0.03, "shake": 1.0},
+	"STILETTO":       {"px":  3.5, "dur": 0.11, "hitstop": 0.03, "shake": 1.2},
+	"ASSASSIN_FANG":  {"px":  4.0, "dur": 0.12, "hitstop": 0.04, "shake": 1.5},
+	"SPEAR":          {"px": 12.0, "dur": 0.20, "hitstop": 0.07, "shake": 3.0},
+	"WAND":           {"px":  5.0, "dur": 0.15, "hitstop": 0.04, "shake": 1.8},
+	"CROSSBOW":       {"px":  9.0, "dur": 0.18, "hitstop": 0.05, "shake": 2.5},
+	"SHADOW_BLADE":   {"px":  6.0, "dur": 0.16, "hitstop": 0.04, "shake": 1.8},
+	"GHOST_BLADE":    {"px":  5.0, "dur": 0.14, "hitstop": 0.03, "shake": 1.5},
+	"VOID_REAPER":    {"px": 13.0, "dur": 0.26, "hitstop": 0.09, "shake": 4.5},
+}
 
 # Patrol path preview — briefly shown when player enters this guard's room
 var _path_preview_t: float = 0.0
 const _PATH_PREVIEW_DUR: float = 3.5
+var show_patrol_path: bool = false  # set by patrol_schedule intel — shows path permanently
+var show_stats: bool = false        # set by guard_weakness intel — reveals HP bar and detection radius always
 
 func _ready():
 	add_to_group("guards")
@@ -94,13 +135,26 @@ func _ready():
 		player.noise_emitted.connect(_on_noise_emitted)
 	_apply_modifier()
 	_original_patrol = patrol_points.duplicate()
-	guard_max_hp = 4 if is_boss else (3 if is_captain else 2)
+	guard_max_hp = 4 if is_boss else (3 if is_captain or is_brute else 2)
 	guard_hp     = guard_max_hp
+	# INQUISITOR: wider vision cone, sees in shadow
+	if is_inquisitor:
+		vision_range += 20.0
+		vision_angle  = 90.0
+	# HEX_CASTER: slower patrol, ranged threat
+	if is_hex_caster:
+		move_interval  *= 1.3
+		detect_fill_rate[AlertState.UNAWARE]    = 1.2
+		detect_fill_rate[AlertState.SUSPICIOUS] = 0.7
 	# Assign dropped weapon based on guard type / role
 	if is_boss:
 		dropped_weapon = "LONGSWORD"
 	elif is_captain:
 		dropped_weapon = "LONGSWORD"
+	elif is_brute:
+		dropped_weapon = "WAR_PICK"
+	elif is_hex_caster:
+		dropped_weapon = "WAND"
 	elif enemy_type == EnemyType.GNOLL:
 		dropped_weapon = "SPEAR"
 	elif enemy_type == EnemyType.HUMAN and randi_range(1, 10) <= 4:
@@ -152,13 +206,15 @@ func _process(delta):
 	if _hurt_flash_t > 0.0:
 		_hurt_flash_t -= delta
 		queue_redraw()
+	if _hitstop_t > 0.0:
+		_hitstop_t -= delta
+		queue_redraw()
 	if _knockback_t > 0.0:
 		_knockback_t -= delta
-		if _sprite != null:
-			var env: float = _knockback_t / _KNOCKBACK_DUR
-			_sprite.position = _knockback_dir * _KNOCKBACK_PX * env * env
-		if _knockback_t <= 0.0 and _sprite != null:
-			_sprite.position = Vector2.ZERO
+		var env: float = max(0.0, _knockback_t) / max(0.001, _knockback_dur_cur)
+		_draw_offset = _knockback_dir * _knockback_px_cur * env * env
+		if _knockback_t <= 0.0:
+			_draw_offset = Vector2.ZERO
 		queue_redraw()
 	# Hold Person
 	if _is_held:
@@ -229,6 +285,23 @@ func _process(delta):
 		if _footprints.size() > 4:
 			_footprints.pop_front()
 	_update_de_escalation(delta)
+	# HEX_CASTER bolt
+	if is_hex_caster and alert_state == AlertState.ALERT and player != null:
+		_hex_charge_t += delta
+		if _hex_bolt_live:
+			_hex_bolt_pos += _hex_bolt_dir * HEX_BOLT_SPEED * delta
+			if _hex_bolt_pos.distance_to(player.global_position) < 10.0:
+				_hex_bolt_live = false
+				if player.has_method("take_damage"):
+					player.take_damage(1)
+			elif _hex_bolt_pos.distance_to(global_position) > vision_range * 2.0:
+				_hex_bolt_live = false
+		elif _hex_charge_t >= HEX_CHARGE_TIME:
+			_hex_charge_t = 0.0
+			_hex_bolt_live  = true
+			_hex_bolt_pos   = global_position
+			_hex_bolt_dir   = (player.global_position - global_position).normalized()
+			AudioManager.noise_alert()
 	queue_redraw()
 
 func _get_move_interval() -> float:
@@ -240,23 +313,59 @@ func _get_chase_interval() -> float:
 	return max(chase_interval * 0.50, chase_interval - heat * chase_interval * 0.12)
 
 func _update_detection(delta):
+	# PHANTOM entry: player is unseen for first 3 seconds on floor entry
+	if player != null and player.has_meta("phantom_entry_timer"):
+		var t: float = player.get_meta("phantom_entry_timer") - delta
+		if t <= 0.0:
+			player.remove_meta("phantom_entry_timer")
+		else:
+			player.set_meta("phantom_entry_timer", t)
+			detection_progress = maxf(0.0, detection_progress - delta * DETECT_DRAIN_RATE)
+			return
 	if _can_see_player:
-		var rate: float = detect_fill_rate.get(alert_state, 0.9)
-		var fill_mult := 1.0
-		if is_sneaking_player():
-			if GameManager.has_passive("DARK_SHROUD"):     fill_mult *= 1.30
-			if GameManager.has_gear_effect("SLOW_DETECT_SNEAK"): fill_mult *= 1.30
-			if GameManager.has_gear_effect("SET_SHADOW"):  fill_mult *= 1.40
-		if GameManager.get_guild_unlock("SHADOW_GUILD"):   fill_mult *= 1.20
-		if GameManager.has_passive("HALFLING_SLOW_DETECT"): fill_mult *= 1.20
-		if GameManager.has_gear_effect("SET_THIEF"):       fill_mult *= 1.15
-		fill_mult /= GameManager.get_wanted_detection_mult()
-		# Dark zone: player near snuffed torch is harder to detect
-		for tn in get_tree().get_nodes_in_group("torches"):
-			if not tn.get("is_lit") and player.global_position.distance_to(tn.global_position) <= 48.0:
-				fill_mult *= 1.65   # detection fills ~40% slower in darkness
-				break
-		detection_progress = min(1.0, detection_progress + delta * (1.0 / rate) / fill_mult)
+		# Base fill rate from StealthSystem (handles complications + modifiers)
+		var state_key: String = "SUSPICIOUS" if alert_state == AlertState.SUSPICIOUS else "UNAWARE"
+		var rate: float = StealthSystem.get_guard_fill_rate(
+			state_key, GameManager.floor_complication,
+			GameManager.run_modifier, GameManager.alert_escalation)
+		# Player-side detection multiplier from StealthSystem
+		var detect_mult: float = StealthSystem.get_player_detect_mult(
+			player, is_sneaking_player(), int(alert_state))
+		# Wanted level: higher wanted = faster detection (inverse of detect_mult direction)
+		detect_mult *= GameManager.get_wanted_detection_mult()
+		# Dark zone: player near snuffed torch halves detection rate
+		# TIEFLING darkvision: not camouflaged by darkness (hellish aura is still visible)
+		if GameManager.selected_race != "TIEFLING":
+			for tn in get_tree().get_nodes_in_group("torches"):
+				if not tn.get("is_lit") and player.global_position.distance_to(tn.global_position) <= 48.0:
+					detect_mult *= 0.55
+					break
+		# TIEFLING intimidation aura: guards hesitate 15% longer (slower fill) when in SUSPICIOUS state
+		if GameManager.selected_race == "TIEFLING" and alert_state == AlertState.SUSPICIOUS:
+			detect_mult *= 0.85
+		# NOBLE_PARTY disguise: player is dressed as a guest — detection fills at half rate
+		if player.has_meta("disguised"):
+			detect_mult *= 0.50
+		# SLOW_DETECT_SNEAK (Shadow Cloak): detection 30% slower while sneaking
+		if is_sneaking_player() and GameManager.has_gear_effect("SLOW_DETECT_SNEAK"):
+			detect_mult *= 0.70
+		# LVL_STEALTH_BONUS level-up reward
+		if GameManager.has_passive("LVL_STEALTH_BONUS"):
+			detect_mult *= 0.80
+		# CURSED_MASK relic: guards in shadow cannot detect player
+		if GameManager.has_relic("CURSED_MASK") and player != null:
+			var guard_in_shadow := false
+			for tn in get_tree().get_nodes_in_group("torches"):
+				if not tn.get("is_lit") and global_position.distance_to(tn.global_position) <= 56.0:
+					guard_in_shadow = true
+					break
+			if guard_in_shadow:
+				detection_progress = maxf(0.0, detection_progress - delta * DETECT_DRAIN_RATE)
+				return
+		# SHADOW_CROWN relic: detection halved at full HP
+		if GameManager.has_relic("SHADOW_CROWN") and GameManager.player_hp >= GameManager.player_max_hp:
+			detect_mult *= 0.50
+		detection_progress = min(1.0, detection_progress + delta * (1.0 / rate) * detect_mult)
 		if detection_progress > 0.5 and not _detect_tick_played:
 			_detect_tick_played = true
 			AudioManager.detect_tick()
@@ -273,7 +382,7 @@ func _update_detection(delta):
 			var p_hidden: bool = player.get("is_hidden") == true
 			if p_hidden: drain_mult = 2.0
 		# SHADOW set bonus: resets instantly on LoS break
-		if GameManager.has_gear_effect("SET_SHADOW"):
+		if GameManager.has_set_bonus("SET_SHADOW"):
 			detection_progress = 0.0
 		else:
 			detection_progress = max(0.0, detection_progress - delta * DETECT_DRAIN_RATE * drain_mult)
@@ -469,11 +578,16 @@ func _check_vision():
 		if cloud.has_method("contains"):
 			if cloud.contains(global_position) or cloud.contains(player.global_position):
 				return
+	# CURSED_MASK relic: INQUISITOR guards cannot detect player
+	if is_inquisitor and GameManager.has_relic("CURSED_MASK"):
+		return
 	# Effective vision range: base + heat bonus - extinguished nearby torches
 	var effective_range: float = vision_range + GameManager.floor_heat_level * 8.0
-	for tn in get_tree().get_nodes_in_group("torches"):
-		if not tn.get("is_lit") and global_position.distance_to(tn.global_position) <= 60.0:
-			effective_range -= 25.0
+	if not is_inquisitor:
+		# Normal guards lose range near extinguished torches
+		for tn in get_tree().get_nodes_in_group("torches"):
+			if not tn.get("is_lit") and global_position.distance_to(tn.global_position) <= 60.0:
+				effective_range -= 25.0
 	effective_range = max(20.0, effective_range)
 	var to_player: Vector2 = player.global_position - global_position
 	if to_player.length() > effective_range:
@@ -496,7 +610,8 @@ func _on_noise_emitted(level: int, world_position: Vector2):
 	for zone in get_tree().get_nodes_in_group("silence_zones"):
 		if zone.has_method("contains") and zone.contains(world_position):
 			return
-	var hear_range: float = HEARING_RANGE[level]
+	# Use StealthSystem's noise radius (includes run modifier bonuses)
+	var hear_range: float = StealthSystem.NOISE_RADII.get(level, HEARING_RANGE.get(level, 0.0))
 	if GameManager.run_modifier == "THIN_WALLS":
 		hear_range += 40.0
 	if hear_range == 0.0 or global_position.distance_to(world_position) > hear_range:
@@ -515,6 +630,9 @@ func _find_body(body_pos: Vector2):
 	GameManager.record_alert()
 	_popup("BODY!", Color(1.0, 0.12, 0.12))
 	AudioManager.alert_blare()
+	for bell in get_tree().get_nodes_in_group("alarm_bells"):
+		if bell.has_method("try_ring"):
+			bell.try_ring(self)
 	for g in get_tree().get_nodes_in_group("guards"):
 		if g != self and global_position.distance_to(g.global_position) <= 120.0:
 			if g.has_method("_become_suspicious"):
@@ -547,6 +665,13 @@ func _escalate_alert():
 			de_escalate_timer = ALERT_TIMEOUT
 			GameManager.record_alert()
 			AudioManager.alert_blare()
+			# Trigger nearby alarm bells
+			for bell in get_tree().get_nodes_in_group("alarm_bells"):
+				if bell.has_method("try_ring"):
+					bell.try_ring(self)
+			# NOBLE_PARTY disguise breaks the moment the guard goes full alert
+			if player != null and player.has_meta("disguised"):
+				player.remove_meta("disguised")
 			var alarm_pos := player.global_position if player else global_position
 			# Goblin scream: alerts EVERY guard on the floor
 			if enemy_type == EnemyType.GOBLIN:
@@ -606,6 +731,14 @@ func resist_takedown():
 	de_escalate_timer = ALERT_TIMEOUT
 	GameManager.record_alert()
 
+func _enter_alert() -> void:
+	if alert_state == AlertState.ALERT:
+		return
+	alert_state = AlertState.ALERT
+	de_escalate_timer = ALERT_TIMEOUT
+	GameManager.record_alert()
+	_popup("!", Color(1.0, 0.25, 0.10))
+
 func apply_hold(duration: float):
 	_is_held    = true
 	_held_timer = duration
@@ -626,14 +759,26 @@ func hurt(damage: int, hit_dir: Vector2 = Vector2.ZERO):
 	guard_hp -= damage
 	_hurt_flash_t = 0.22
 
-	# Knockback twitch away from hit direction
+	# Look up per-weapon knockback feel
+	var wid: String = ""
+	if player != null and player.get("weapon") != null:
+		wid = str(player.get("weapon"))
+	var wkb: Dictionary = _WEAPON_KNOCKBACK.get(wid, {})
+	_knockback_px_cur  = wkb.get("px",      _KNOCKBACK_PX)
+	_knockback_dur_cur = wkb.get("dur",     _KNOCKBACK_DUR)
+	_hitstop_t         = wkb.get("hitstop", 0.05)
+	var shake_str: float = wkb.get("shake", 2.0)
+
+	# Knockback direction
 	if hit_dir != Vector2.ZERO:
-		_knockback_dir  = hit_dir.normalized()
-		_knockback_t    = _KNOCKBACK_DUR
+		_knockback_dir = hit_dir.normalized()
 	elif player != null:
-		var away: Vector2 = (global_position - player.global_position).normalized()
-		_knockback_dir  = away
-		_knockback_t    = _KNOCKBACK_DUR
+		_knockback_dir = (global_position - player.global_position).normalized()
+	_knockback_t = _knockback_dur_cur
+	_kill_dir    = _knockback_dir
+
+	# Screen shake proportional to weapon weight
+	GameManager.shake(shake_str, 0.18)
 
 	stagger(0.30)
 	_escalate_alert()
@@ -684,8 +829,8 @@ func takedown(attacker_is_sneaking: bool, is_dart: bool = false):
 		GameManager.record_boss_kill()
 		_popup("%s ELIMINATED — +300gp" % GameManager.boss_name, Color(0.95, 0.78, 0.15))
 		GameManager.shake(6.0, 0.5)
-	_spawn_death_effects()
-	_spawn_body()
+	_spawn_death_effects(_kill_dir)
+	_spawn_body(_kill_dir)
 	queue_free()
 
 func _boss_summon_backup():
@@ -703,15 +848,15 @@ func _popup(text: String, color: Color):
 	p.global_position = global_position + Vector2(0, -22)
 	get_tree().root.add_child(p)
 
-func _spawn_death_effects():
-	# Dropped weapon — player can pick it up
+func _spawn_death_effects(kill_dir: Vector2 = Vector2.ZERO):
+	# Dropped weapon — flies in kill direction briefly
 	if dropped_weapon != "NONE":
 		var drop_script = load("res://DroppedWeapon.gd")
 		var drop        := Node2D.new()
 		drop.set_script(drop_script)
 		get_tree().root.add_child(drop)
-		drop.global_position = global_position + Vector2(randf_range(-4, 4), randf_range(-4, 4))
-		drop.call("setup", dropped_weapon)
+		drop.global_position = global_position + Vector2(randf_range(-3, 3), randf_range(-3, 3))
+		drop.call("setup", dropped_weapon, kill_dir)
 
 	# Blood pool — persists on the floor
 	var pool_script = load("res://BloodPool.gd")
@@ -720,19 +865,20 @@ func _spawn_death_effects():
 	get_tree().root.add_child(pool)
 	pool.global_position = global_position
 
-	# Death burst — radial explosion
+	# Death burst — directional radial explosion
 	var burst_script = load("res://DeathBurst.gd")
 	var burst        := Node2D.new()
 	burst.set_script(burst_script)
 	get_tree().root.add_child(burst)
 	burst.global_position = global_position
 	var bcol := Color(1.0, 0.20, 0.10) if not is_boss else Color(1.0, 0.55, 0.05)
-	burst.setup(bcol)
+	burst.setup(bcol, kill_dir)
 
-func _spawn_body():
+func _spawn_body(kill_dir: Vector2 = Vector2.ZERO):
 	var body := Node2D.new()
 	body.set_script(_body_script)
 	body.set_meta("body_facing", facing)
+	body.set_meta("kill_dir", kill_dir)
 	# Roll loot, pre-compute display data so BodyMarker needs no LootSystem reference
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
@@ -758,16 +904,27 @@ func _draw():
 	var f    := facing.normalized()
 	var perp2 := f.rotated(PI * 0.5)
 
-	# ── SVG Guard body ────────────────────────────────────────────────────────
+	# ── Ground shadow ellipse ─────────────────────────────────────────────────
+	var shadow_off: Vector2 = _draw_offset * 0.4
+	draw_set_transform(Vector2(1.5 + shadow_off.x, 5.5 + shadow_off.y), 0.0, Vector2(1.0, 0.38))
+	draw_circle(Vector2.ZERO, 7.5, Color(0.0, 0.0, 0.0, 0.28))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2(1.0, 1.0))
+
+	# ── SVG Guard body + weapon silhouette (with knockback offset) ────────────
+	if _draw_offset != Vector2.ZERO:
+		draw_set_transform(_draw_offset, 0.0, Vector2.ONE)
 	_draw_guard_svg(f, perp2)
+	_draw_guard_weapon(f, perp2)
+	if _draw_offset != Vector2.ZERO:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 	var half_angle    := deg_to_rad(vision_angle / 2.0)
 	var facing_angle  := facing.angle()
 	var perp          := facing.rotated(PI * 0.5).normalized()
 
 	# ── Patrol path preview — faint dotted route, fades over time ────────────
-	if _path_preview_t > 0.0 and patrol_points.size() >= 2:
-		var fade: float = _path_preview_t / _PATH_PREVIEW_DUR
+	if (show_patrol_path or _path_preview_t > 0.0) and patrol_points.size() >= 2:
+		var fade: float = 1.0 if show_patrol_path else _path_preview_t / _PATH_PREVIEW_DUR
 		var col := Color(0.80, 0.72, 0.28, fade * 0.55)
 		for i in range(patrol_points.size()):
 			var from: Vector2 = patrol_points[i] - position
@@ -894,8 +1051,22 @@ func _draw():
 		draw_string(font2, Vector2(-tw * 0.5, -24), bname,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.95, 0.65, 0.15, 0.95))
 
+	# ── Guard profile (show_stats: always reveal HP + detection radius ring) ─
+	if show_stats:
+		var r: float = vision_range
+		draw_arc(Vector2.ZERO, r, 0, TAU, 48, Color(0.85, 0.30, 0.30, 0.22), 1.0)
+		var bw2 := 20.0; var bh2 := 2.0; var by2 := -32.0
+		draw_rect(Rect2(-bw2 * 0.5, by2, bw2, bh2), Color(0.10, 0.08, 0.08, 0.85))
+		var hf2 := float(guard_hp) / float(guard_max_hp)
+		var hc2 := Color(0.20, 0.85, 0.30) if hf2 > 0.5 else (Color(0.95, 0.70, 0.10) if hf2 > 0.25 else Color(0.95, 0.15, 0.15))
+		draw_rect(Rect2(-bw2 * 0.5, by2, bw2 * hf2, bh2), hc2)
+		draw_rect(Rect2(-bw2 * 0.5, by2, bw2, bh2), Color(0.5, 0.5, 0.5, 0.5), false, 0.5)
+		draw_string(ThemeDB.fallback_font, Vector2(-bw2 * 0.5, by2 - 1.0),
+			"%d/%d" % [guard_hp, guard_max_hp], HORIZONTAL_ALIGNMENT_LEFT, bw2 + 4, 8,
+			Color(hc2.r, hc2.g, hc2.b, 0.90))
+
 	# ── HP bar (only when damaged) ───────────────────────────────────────────
-	if guard_hp < guard_max_hp:
+	if guard_hp < guard_max_hp and not show_stats:
 		var bw := 20.0; var bh := 3.0; var by := -28.0
 		draw_rect(Rect2(-bw * 0.5, by, bw, bh), Color(0.10, 0.08, 0.08, 0.92))
 		var hp_frac := float(guard_hp) / float(guard_max_hp)
@@ -912,6 +1083,27 @@ func _draw():
 	if is_captain:
 		draw_arc(Vector2.ZERO, 8.5, 0, TAU, 24, Color(0.95, 0.78, 0.15, 0.65), 2.0)
 		draw_arc(Vector2.ZERO, 9.5, 0, TAU, 24, Color(0.95, 0.78, 0.15, 0.22), 1.0)
+	# ── V10 Archetype indicators ──────────────────────────────────────────────
+	if is_inquisitor:
+		draw_arc(Vector2.ZERO, 8.0, 0, TAU, 24, Color(0.30, 0.55, 0.80, 0.70), 1.8)
+		draw_arc(Vector2.ZERO, 9.2, 0, TAU, 24, Color(0.30, 0.55, 0.80, 0.25), 1.0)
+		# "eye" sigil
+		draw_circle(Vector2.ZERO, 2.2, Color(0.55, 0.90, 1.00, 0.85))
+	if is_brute:
+		draw_arc(Vector2.ZERO, 9.0, 0, TAU, 24, Color(0.75, 0.20, 0.15, 0.65), 2.2)
+	if is_hex_caster:
+		var pulse: float = 0.5 + 0.5 * sin(_anim_t * 4.0)
+		draw_arc(Vector2.ZERO, 8.0, 0, TAU, 24, Color(0.55, 0.20, 0.80, 0.55 + 0.20 * pulse), 1.6)
+		# Draw hex charge indicator
+		if _hex_charge_t > 0.0 and alert_state == AlertState.ALERT:
+			var charge_frac: float = _hex_charge_t / HEX_CHARGE_TIME
+			draw_arc(Vector2.ZERO, 10.0, -PI * 0.5, -PI * 0.5 + TAU * charge_frac, 24,
+				Color(0.80, 0.30, 1.00, 0.80), 2.0)
+		# Draw live bolt (world-space → local offset)
+		if _hex_bolt_live:
+			var bolt_local: Vector2 = _hex_bolt_pos - global_position
+			draw_circle(bolt_local, 3.5, Color(0.75, 0.25, 1.00, 0.90))
+			draw_circle(bolt_local, 2.0, Color(1.00, 0.80, 1.00, 0.95))
 
 
 func _draw_guard_svg(f: Vector2, perp: Vector2):
@@ -925,6 +1117,21 @@ func _draw_guard_svg(f: Vector2, perp: Vector2):
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED ART HELPERS — isometric 3/4 perspective primitives
 # ─────────────────────────────────────────────────────────────────────────────
+
+const _OUTLINE := Color(0.05, 0.04, 0.06, 0.95)
+
+func _outline_poly(pts: PackedVector2Array, thickness: float = 1.6, col: Color = _OUTLINE) -> void:
+	# Draw a dark outline behind a filled polygon — pass pts BEFORE drawing the fill.
+	var n: int = pts.size()
+	if n < 2:
+		return
+	for i in range(n):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[(i + 1) % n]
+		draw_line(a, b, col, thickness)
+
+func _outline_circle(c: Vector2, r: float, thickness: float = 1.4, col: Color = _OUTLINE) -> void:
+	draw_arc(c, r + thickness * 0.35, 0, TAU, 18, col, thickness)
 
 func _iso_box(center: Vector2, f: Vector2, perp2: Vector2, fwd_size: float, side_size: float, height: float, base_col: Color):
 	# 3-face isometric box: top (lightened), front (base), shadow side (darkened)
@@ -949,10 +1156,11 @@ func _iso_box(center: Vector2, f: Vector2, perp2: Vector2, fwd_size: float, side
 # ─────────────────────────────────────────────────────────────────────────────
 
 func _draw_human_svg(f: Vector2, perp2: Vector2):
-	var sc: float = 1.35 if is_boss else (1.18 if is_captain else 1.0)
+	var sc: float = 1.40 if is_boss else (1.20 if is_captain else 1.0)
 	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
 	var leg_swing: float = (sin(_anim_t * 7.0) * 2.0 * sc) if moving else 0.0
 	var bob: float = (sin(_anim_t * 7.0) * 0.4 * sc) if moving else 0.0
+	var alert_pulse: float = 0.5 + 0.5 * sin(_anim_t * 7.0)
 
 	# 1. Ground shadow — elongated along facing
 	var shadow_pts: PackedVector2Array = PackedVector2Array()
@@ -961,18 +1169,56 @@ func _draw_human_svg(f: Vector2, perp2: Vector2):
 		var sx: float = cos(a) * 6.5 * sc
 		var sy: float = sin(a) * 3.2 * sc
 		shadow_pts.append(f * sx + perp2 * sy + Vector2(0.5, 2.0) * sc)
-	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.30))
+	draw_colored_polygon(shadow_pts, Color(0.0, 0.0, 0.0, 0.35))
 
-	# Tabard color by alert state
+	# Tabard color by alert state — alert glows red
 	var tabard_col: Color = Color(0.28, 0.32, 0.42)
 	if alert_state == AlertState.SUSPICIOUS:
-		tabard_col = Color(0.45, 0.38, 0.18)
+		tabard_col = Color(0.55, 0.42, 0.18)
 	elif alert_state == AlertState.ALERT:
-		tabard_col = Color(0.65, 0.12, 0.12)
+		tabard_col = Color(0.85, 0.12, 0.12).lerp(Color(1.0, 0.35, 0.20), alert_pulse)
+
+	# Boss tabard is dark with gold runes
+	if is_boss:
+		tabard_col = Color(0.18, 0.05, 0.08) if alert_state != AlertState.ALERT else Color(0.55, 0.08, 0.08)
 
 	var armor_col: Color = Color(0.25, 0.25, 0.28)
 	var chain_col: Color = Color(0.35, 0.33, 0.38)
 	var metal_pauld: Color = Color(0.30, 0.28, 0.34)
+
+	# Boss: ornate black armor
+	if is_boss:
+		armor_col = Color(0.10, 0.09, 0.13)
+		chain_col = Color(0.15, 0.13, 0.18)
+		metal_pauld = Color(0.12, 0.10, 0.15)
+
+	# ALERT aura halo on ground (red glow)
+	if alert_state == AlertState.ALERT:
+		var halo_r: float = (7.5 + alert_pulse * 1.5) * sc
+		draw_arc(Vector2(0, 2.0 * sc), halo_r, 0, TAU, 22,
+			Color(1.0, 0.10, 0.10, 0.20 + alert_pulse * 0.15), 2.0)
+
+	# BOSS — flowing red cape behind everything
+	if is_boss:
+		var cape_top: Vector2 = Vector2(0, -8.5 * sc)
+		var cape_sway: float = sin(_anim_t * 1.6) * 1.6 * sc
+		var cape_col: Color = Color(0.55, 0.05, 0.08)
+		var cape_pts := PackedVector2Array([
+			cape_top + Vector2(-3.8 * sc, 0),
+			cape_top + Vector2(3.8 * sc, 0),
+			cape_top + Vector2(5.2 * sc + cape_sway * 0.3, 6.5 * sc),
+			cape_top + Vector2(2.0 * sc + cape_sway, 11.5 * sc),
+			cape_top + Vector2(-2.0 * sc + cape_sway, 11.5 * sc),
+			cape_top + Vector2(-5.2 * sc + cape_sway * 0.3, 6.5 * sc),
+		])
+		_outline_poly(cape_pts, 1.8)
+		draw_colored_polygon(cape_pts, cape_col)
+		# Cape inner fold highlight
+		draw_line(cape_top + Vector2(0, 1.0), cape_top + Vector2(cape_sway * 0.5, 10.0 * sc), cape_col.darkened(0.35), 1.2)
+		draw_line(cape_top + Vector2(-1.5 * sc, 1.0), cape_top + Vector2(-2.0 * sc + cape_sway, 11.0 * sc), cape_col.darkened(0.25), 0.6)
+		draw_line(cape_top + Vector2(1.5 * sc, 1.0), cape_top + Vector2(2.0 * sc + cape_sway, 11.0 * sc), cape_col.darkened(0.25), 0.6)
+		# Gold trim along top
+		draw_line(cape_top + Vector2(-3.8 * sc, 0), cape_top + Vector2(3.8 * sc, 0), Color(0.95, 0.78, 0.22), 1.0)
 
 	# 2. Back armored leg
 	var back_leg_top: Vector2 = -f * 0.5 - perp2 * 2.2 * sc + Vector2(0, -2.5 * sc)
@@ -1041,11 +1287,15 @@ func _draw_armored_leg(top: Vector2, bot: Vector2, perp2: Vector2, sc: float, co
 		bot - perp2 * w_bot,
 		bot + perp2 * w_bot,
 	])
+	_outline_poly(pts, 1.6)
 	draw_colored_polygon(pts, col)
 	# Top highlight
-	draw_line(top + perp2 * w_top, top - perp2 * w_top, col.lightened(0.25), 0.8)
+	draw_line(top + perp2 * w_top, top - perp2 * w_top, col.lightened(0.30), 0.9)
 	# Shadow side
-	draw_line(top - perp2 * w_top, bot - perp2 * w_bot, col.darkened(0.40), 0.6)
+	draw_line(top - perp2 * w_top, bot - perp2 * w_bot, col.darkened(0.45), 0.7)
+	# Knee plate accent
+	var knee: Vector2 = top.lerp(bot, 0.45)
+	draw_circle(knee, 0.7 * sc, col.lightened(0.18))
 	# Boot
 	var boot_pts := PackedVector2Array([
 		bot + perp2 * w_bot * 1.4,
@@ -1053,8 +1303,9 @@ func _draw_armored_leg(top: Vector2, bot: Vector2, perp2: Vector2, sc: float, co
 		bot - perp2 * w_bot * 1.4 + Vector2(0, 1.5 * sc),
 		bot + perp2 * w_bot * 1.6 + Vector2(0, 1.5 * sc),
 	])
-	draw_colored_polygon(boot_pts, Color(0.16, 0.12, 0.08))
-	draw_line(boot_pts[0], boot_pts[1], Color(0.30, 0.22, 0.14), 0.6)
+	_outline_poly(boot_pts, 1.4)
+	draw_colored_polygon(boot_pts, Color(0.10, 0.07, 0.05))
+	draw_line(boot_pts[0], boot_pts[1], Color(0.30, 0.22, 0.14), 0.7)
 
 func _draw_human_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, chain_col: Color, tabard_col: Color):
 	var w: float = 4.0 * sc
@@ -1064,44 +1315,79 @@ func _draw_human_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, chain_
 	var fr: Vector2 = c + Vector2(w, h * 0.5)
 	var tr: Vector2 = c + Vector2(w * 0.9, -h * 0.5)
 	var tl: Vector2 = c + Vector2(-w * 0.9, -h * 0.5)
-	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), chain_col)
+	var torso_outline := PackedVector2Array([fl, fr, tr, tl])
+	_outline_poly(torso_outline, 2.0)
+	draw_colored_polygon(torso_outline, chain_col)
 	# Top face (shoulders)
 	draw_colored_polygon(PackedVector2Array([
 		tl, tr,
 		tr + f * -2.0 * sc, tl + f * -2.0 * sc,
-	]), chain_col.lightened(0.20))
+	]), chain_col.lightened(0.22))
 	# Shadow side band
-	draw_line(fr, tr, chain_col.darkened(0.40), 1.4)
-	# Chainmail dots — texture pattern on front
-	for ix in range(3):
-		for iy in range(4):
-			var dot: Vector2 = c + Vector2(-w * 0.55 + ix * w * 0.55, -h * 0.35 + iy * h * 0.22)
-			draw_circle(dot, 0.45, chain_col.lightened(0.30))
-	# Tabard front overlay — vertical strip
+	draw_line(fr, tr, chain_col.darkened(0.50), 1.6)
+	# Chainmail dots — denser repeating ring pattern (Hades-style texture)
+	var dot_col: Color = chain_col.lightened(0.32)
+	var dot_dk: Color = chain_col.darkened(0.30)
+	for iy in range(5):
+		var offset_x: float = (iy % 2) * 0.35
+		for ix in range(5):
+			var dx: float = -w * 0.65 + (ix + offset_x) * w * 0.32
+			var dy: float = -h * 0.40 + iy * h * 0.20
+			var dot: Vector2 = c + Vector2(dx, dy)
+			draw_circle(dot + Vector2(0.15, 0.15), 0.45, dot_dk)
+			draw_circle(dot, 0.42, dot_col)
+	# Tabard front overlay — vertical strip with outline
 	var tab_w: float = w * 0.45
-	draw_colored_polygon(PackedVector2Array([
+	var tab_pts := PackedVector2Array([
 		c + Vector2(-tab_w, h * 0.5),
 		c + Vector2(tab_w, h * 0.5),
 		c + Vector2(tab_w * 0.9, -h * 0.4),
 		c + Vector2(-tab_w * 0.9, -h * 0.4),
-	]), tabard_col)
+	])
+	_outline_poly(tab_pts, 1.3)
+	draw_colored_polygon(tab_pts, tabard_col)
 	# Tabard centerline
-	draw_line(c + Vector2(0, h * 0.5), c + Vector2(0, -h * 0.4), tabard_col.darkened(0.30), 0.5)
-	# Trim — boss=gold, captain=silver
+	draw_line(c + Vector2(0, h * 0.5), c + Vector2(0, -h * 0.4), tabard_col.darkened(0.40), 0.6)
+	# Alert tabard glow (red shimmer)
+	if alert_state == AlertState.ALERT and not is_boss:
+		var glow_a: float = 0.30 + 0.25 * abs(sin(_anim_t * 6.0))
+		draw_colored_polygon(tab_pts, Color(1.0, 0.20, 0.10, glow_a))
+	# Trim — boss=gold runes, captain=gold
 	if is_boss:
-		var gold: Color = Color(0.88, 0.70, 0.18)
-		draw_line(fl, fr, gold, 0.8)
-		draw_line(tl, tr, gold, 0.6)
-		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), gold, 0.6)
-		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), gold, 0.6)
+		var gold: Color = Color(0.95, 0.78, 0.22)
+		# Gold edge trim on every armor seam
+		draw_line(fl, fr, gold, 1.0)
+		draw_line(tl, tr, gold, 0.8)
+		draw_line(fl, tl, gold, 0.7)
+		draw_line(fr, tr, gold, 0.7)
+		# Gold rune marks on tabard
+		var rune_y0: float = -h * 0.25
+		for ri in range(3):
+			var ry: float = rune_y0 + float(ri) * h * 0.25
+			var rc: Vector2 = c + Vector2(0, ry)
+			# diamond rune
+			draw_colored_polygon(PackedVector2Array([
+				rc + Vector2(0, -0.8),
+				rc + Vector2(0.7, 0),
+				rc + Vector2(0, 0.8),
+				rc + Vector2(-0.7, 0),
+			]), gold)
+			draw_circle(rc, 0.25, Color(1.0, 0.95, 0.55))
+		# Tabard edge gold
+		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), gold, 0.7)
+		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), gold, 0.7)
 	elif is_captain:
-		var silver: Color = Color(0.72, 0.70, 0.78)
-		draw_line(fl, fr, silver, 0.7)
-		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), silver, 0.5)
-		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), silver, 0.5)
+		var gold2: Color = Color(0.92, 0.74, 0.18)
+		draw_line(fl, fr, gold2, 0.8)
+		draw_line(tl, tr, gold2, 0.6)
+		draw_line(c + Vector2(-tab_w, h * 0.5), c + Vector2(-tab_w * 0.9, -h * 0.4), gold2, 0.6)
+		draw_line(c + Vector2(tab_w, h * 0.5), c + Vector2(tab_w * 0.9, -h * 0.4), gold2, 0.6)
+		# Captain shoulder rank pips
+		draw_circle(c + Vector2(-w * 0.7, -h * 0.35), 0.4, gold2)
+		draw_circle(c + Vector2(w * 0.7, -h * 0.35), 0.4, gold2)
 
 func _draw_pauldron(c: Vector2, f: Vector2, perp2: Vector2, sc: float, col: Color, is_lit: bool):
-	var r: float = 2.2 * sc
+	var r: float = 2.4 * sc
 	var pts := PackedVector2Array([
 		c + Vector2(-r, 0.2 * sc),
 		c + Vector2(-r * 0.7, -r * 0.9),
@@ -1109,7 +1395,16 @@ func _draw_pauldron(c: Vector2, f: Vector2, perp2: Vector2, sc: float, col: Colo
 		c + Vector2(r, -r * 0.3),
 		c + Vector2(r * 0.8, r * 0.4),
 	])
+	_outline_poly(pts, 1.6)
 	draw_colored_polygon(pts, col)
+	# Boss/captain gold rim
+	if is_boss:
+		var gold: Color = Color(0.95, 0.78, 0.22)
+		draw_line(pts[1], pts[2], gold, 0.7)
+		draw_line(pts[2], pts[3], gold, 0.6)
+	elif is_captain:
+		var gold2: Color = Color(0.92, 0.74, 0.18)
+		draw_line(pts[1], pts[2], gold2, 0.5)
 	# Top highlight
 	if is_lit:
 		draw_line(pts[1], pts[2], col.lightened(0.35), 0.7)
@@ -1122,6 +1417,12 @@ func _draw_pauldron(c: Vector2, f: Vector2, perp2: Vector2, sc: float, col: Colo
 
 func _draw_human_helmet(c: Vector2, f: Vector2, perp2: Vector2, sc: float, tabard_col: Color):
 	var helm_col: Color = Color(0.28, 0.26, 0.32)
+	if is_boss:
+		helm_col = Color(0.10, 0.09, 0.13)
+	# ALERT: helmet glows red
+	if alert_state == AlertState.ALERT:
+		var hp: float = 0.5 + 0.5 * sin(_anim_t * 6.0)
+		helm_col = helm_col.lerp(Color(0.85, 0.18, 0.10), 0.45 + hp * 0.25)
 	var w: float = 3.4 * sc
 	var h: float = 4.2 * sc
 	# Helmet base — front face
@@ -1129,7 +1430,9 @@ func _draw_human_helmet(c: Vector2, f: Vector2, perp2: Vector2, sc: float, tabar
 	var fr: Vector2 = c + Vector2(w, h * 0.5)
 	var tr: Vector2 = c + Vector2(w * 0.85, -h * 0.5)
 	var tl: Vector2 = c + Vector2(-w * 0.85, -h * 0.5)
-	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), helm_col)
+	var helm_outline := PackedVector2Array([fl, fr, tr, tl])
+	_outline_poly(helm_outline, 1.8)
+	draw_colored_polygon(helm_outline, helm_col)
 	# Top face
 	draw_colored_polygon(PackedVector2Array([
 		tl, tr,
@@ -1161,43 +1464,89 @@ func _draw_human_helmet(c: Vector2, f: Vector2, perp2: Vector2, sc: float, tabar
 	draw_circle(c + Vector2(w * 0.45, visor_y - c.y), 0.55 * sc, eye_col)
 	# Brow ridge (lightened top of visor)
 	draw_line(fl + Vector2(0.4, -0.4), fr + Vector2(-0.4, -0.4), helm_col.lightened(0.30), 0.6)
-	# Captain plume
+	# Captain plume — GOLD swaying crest
 	if is_captain and not is_boss:
-		var plume_col: Color = Color(0.82, 0.18, 0.18)
+		var plume_col: Color = Color(0.95, 0.78, 0.18)
+		var plume_dark: Color = Color(0.65, 0.45, 0.08)
 		var base: Vector2 = c + Vector2(0, -h * 0.5)
-		for i in range(5):
-			var t_p: float = float(i) / 4.0
-			var sway: float = sin(_anim_t * 5.0 + t_p * 2.0) * 1.5
-			var p1: Vector2 = base + Vector2(sway * t_p, -t_p * 5.0 * sc)
-			var p2: Vector2 = base + Vector2(sway * t_p - 0.8 * sc, -t_p * 5.0 * sc - 1.2 * sc)
-			draw_line(p1, p2, plume_col, 1.6 - t_p)
-			draw_line(p1, p2 + Vector2(1.6 * sc, 0), plume_col.darkened(0.20), 1.2 - t_p)
-	# Boss crown
+		# Mount/base
+		draw_colored_polygon(PackedVector2Array([
+			base + Vector2(-1.2 * sc, 0),
+			base + Vector2(1.2 * sc, 0),
+			base + Vector2(0.8 * sc, -1.0 * sc),
+			base + Vector2(-0.8 * sc, -1.0 * sc),
+		]), Color(0.20, 0.18, 0.10))
+		# Flowing plume strands
+		for i in range(6):
+			var t_p: float = float(i) / 5.0
+			var sway: float = sin(_anim_t * 4.0 + t_p * 2.5) * 1.8
+			var p1: Vector2 = base + Vector2(sway * t_p - 0.4 * sc, -t_p * 6.0 * sc - 0.5 * sc)
+			var p2: Vector2 = base + Vector2(sway * t_p - 1.4 * sc, -t_p * 6.0 * sc - 1.8 * sc)
+			draw_line(p1, p2, plume_dark, 1.8 - t_p * 0.6)
+			draw_line(p1 + Vector2(0.3, 0), p2 + Vector2(0.3, 0), plume_col, 1.3 - t_p * 0.5)
+	# Boss crown — ornate dark horns with gold gilding
 	if is_boss:
-		var gold: Color = Color(0.92, 0.74, 0.18)
-		var base: Vector2 = c + Vector2(0, -h * 0.5 - 0.6 * sc)
-		# Three crown spikes
-		for i in range(3):
-			var off_x: float = (i - 1) * w * 0.55
-			var spike := PackedVector2Array([
-				base + Vector2(off_x - 0.8 * sc, 0),
-				base + Vector2(off_x, -2.2 * sc),
-				base + Vector2(off_x + 0.8 * sc, 0),
-			])
-			draw_colored_polygon(spike, gold)
-			# Gem
-			draw_circle(base + Vector2(off_x, -1.4 * sc), 0.5 * sc, Color(0.95, 0.15, 0.20))
-		draw_line(base + Vector2(-w, 0), base + Vector2(w, 0), gold, 1.0)
+		var gold: Color = Color(0.95, 0.78, 0.22)
+		var dark_iron: Color = Color(0.12, 0.10, 0.15)
+		var base: Vector2 = c + Vector2(0, -h * 0.5 - 0.4 * sc)
+		# Crown band
+		draw_colored_polygon(PackedVector2Array([
+			base + Vector2(-w * 1.05, 0),
+			base + Vector2(w * 1.05, 0),
+			base + Vector2(w * 0.95, -1.1 * sc),
+			base + Vector2(-w * 0.95, -1.1 * sc),
+		]), dark_iron)
+		_outline_poly(PackedVector2Array([
+			base + Vector2(-w * 1.05, 0),
+			base + Vector2(w * 1.05, 0),
+			base + Vector2(w * 0.95, -1.1 * sc),
+			base + Vector2(-w * 0.95, -1.1 * sc),
+		]), 1.2, gold)
+		# Side horns — curving outward
+		var horn_l := PackedVector2Array([
+			base + Vector2(-w * 1.0, -0.5 * sc),
+			base + Vector2(-w * 1.9, -2.5 * sc),
+			base + Vector2(-w * 2.2, -1.0 * sc),
+			base + Vector2(-w * 1.4, -0.2 * sc),
+		])
+		_outline_poly(horn_l, 1.4)
+		draw_colored_polygon(horn_l, dark_iron)
+		draw_line(horn_l[0], horn_l[1], gold, 0.5)
+		var horn_r := PackedVector2Array([
+			base + Vector2(w * 1.0, -0.5 * sc),
+			base + Vector2(w * 1.9, -2.5 * sc),
+			base + Vector2(w * 2.2, -1.0 * sc),
+			base + Vector2(w * 1.4, -0.2 * sc),
+		])
+		_outline_poly(horn_r, 1.4)
+		draw_colored_polygon(horn_r, dark_iron)
+		draw_line(horn_r[0], horn_r[1], gold, 0.5)
+		# Central spike with red gem
+		var spike_pts := PackedVector2Array([
+			base + Vector2(-1.0 * sc, -0.5 * sc),
+			base + Vector2(0, -3.2 * sc),
+			base + Vector2(1.0 * sc, -0.5 * sc),
+		])
+		_outline_poly(spike_pts, 1.3)
+		draw_colored_polygon(spike_pts, dark_iron)
+		draw_line(spike_pts[0], spike_pts[1], gold, 0.6)
+		draw_line(spike_pts[1], spike_pts[2], gold.darkened(0.20), 0.5)
+		# Glowing red gem on forehead
+		var gem_pulse: float = 0.7 + 0.3 * sin(_anim_t * 3.0)
+		draw_circle(base + Vector2(0, -0.7 * sc), 0.85 * sc, Color(0.0, 0.0, 0.0))
+		draw_circle(base + Vector2(0, -0.7 * sc), 0.70 * sc, Color(0.95, 0.10, 0.12))
+		draw_circle(base + Vector2(-0.2 * sc, -0.9 * sc), 0.30 * sc, Color(1.0, 0.55, 0.45, gem_pulse))
 
 func _draw_spear(hand: Vector2, f: Vector2, perp2: Vector2, sc: float):
-	var shaft_col: Color = Color(0.42, 0.28, 0.14)
+	var shaft_col: Color = Color(0.32, 0.20, 0.10)
 	var tip: Vector2 = hand + Vector2(0, -14.0 * sc)
 	var butt: Vector2 = hand + Vector2(0, 4.0 * sc)
-	# Shaft
-	draw_line(butt, tip, shaft_col, 1.2)
-	draw_line(butt + Vector2(0.4, 0), tip + Vector2(0.4, 0), shaft_col.lightened(0.20), 0.4)
+	# Dark outline behind shaft
+	draw_line(butt, tip, _OUTLINE, 2.0)
+	draw_line(butt, tip, shaft_col, 1.4)
+	draw_line(butt + Vector2(0.4, 0), tip + Vector2(0.4, 0), shaft_col.lightened(0.25), 0.5)
 	# Spearhead
-	var head_col: Color = Color(0.72, 0.70, 0.78)
+	var head_col: Color = Color(0.78, 0.76, 0.84)
 	var head_base: Vector2 = tip + Vector2(0, 2.0 * sc)
 	var head_pts := PackedVector2Array([
 		head_base + Vector2(-1.3 * sc, 0),
@@ -1205,6 +1554,7 @@ func _draw_spear(hand: Vector2, f: Vector2, perp2: Vector2, sc: float):
 		head_base + Vector2(1.3 * sc, 0),
 		head_base,
 	])
+	_outline_poly(head_pts, 1.4)
 	draw_colored_polygon(head_pts, head_col)
 	draw_line(head_pts[0], head_pts[1], head_col.lightened(0.35), 0.5)
 	draw_line(head_pts[1], head_pts[2], head_col.darkened(0.30), 0.5)
@@ -1274,28 +1624,38 @@ func _draw_skeleton_svg(f: Vector2, perp2: Vector2):
 	draw_circle(neck + Vector2(-4.2, 0.3), 0.7, bone_col)
 	draw_circle(neck + Vector2(4.2, 0.3), 0.7, bone_col)
 
-	# Decayed armor scrap on shoulder (one side only)
-	var scrap_col: Color = Color(0.28, 0.26, 0.30)
-	draw_colored_polygon(PackedVector2Array([
+	# Decayed armor scrap on shoulder — rusty brown
+	var scrap_col: Color = Color(0.42, 0.22, 0.10)
+	var rust_dark: Color = Color(0.25, 0.12, 0.05)
+	var scrap_pts := PackedVector2Array([
 		neck + Vector2(-5.2, -0.5),
 		neck + Vector2(-2.8, -1.0),
 		neck + Vector2(-2.5, 1.4),
 		neck + Vector2(-5.4, 1.0),
-	]), scrap_col)
-	draw_line(neck + Vector2(-5.2, -0.5), neck + Vector2(-2.8, -1.0), scrap_col.lightened(0.20), 0.4)
+	])
+	_outline_poly(scrap_pts, 1.2)
+	draw_colored_polygon(scrap_pts, scrap_col)
+	draw_line(scrap_pts[0], scrap_pts[1], scrap_col.lightened(0.20), 0.4)
+	# Rust streaks
+	draw_line(neck + Vector2(-4.5, 0.0), neck + Vector2(-4.0, 1.2), rust_dark, 0.4)
+	draw_line(neck + Vector2(-3.2, -0.5), neck + Vector2(-3.0, 1.0), rust_dark, 0.3)
 
 	# 6. Arm bones
 	_draw_skeleton_arm(neck + Vector2(-4.2, 0.3) + rattle_l * 0.5, true, bone_col, bone_dark)
 	_draw_skeleton_arm(neck + Vector2(4.2, 0.3) + rattle_r * 0.5, false, bone_col, bone_dark)
 
-	# Cracked chestplate fragment
-	draw_colored_polygon(PackedVector2Array([
+	# Cracked rusty chestplate fragment
+	var chest_pts := PackedVector2Array([
 		spine_center + Vector2(-2.5, -2.5),
 		spine_center + Vector2(2.8, -1.8),
 		spine_center + Vector2(2.0, 1.0),
 		spine_center + Vector2(-1.5, 0.5),
 		spine_center + Vector2(-2.8, -0.5),
-	]), scrap_col.darkened(0.10))
+	])
+	_outline_poly(chest_pts, 1.4)
+	draw_colored_polygon(chest_pts, Color(0.48, 0.24, 0.10))
+	# Highlight
+	draw_line(chest_pts[0], chest_pts[1], Color(0.65, 0.38, 0.18), 0.5)
 	# Crack lines
 	draw_line(spine_center + Vector2(-1.0, -2.2), spine_center + Vector2(0.5, 0.8), Color(0.10, 0.08, 0.08), 0.5)
 	draw_line(spine_center + Vector2(1.2, -1.5), spine_center + Vector2(0.8, -0.3), Color(0.10, 0.08, 0.08), 0.4)
@@ -1368,12 +1728,14 @@ func _draw_skeleton_ribs(spine_center: Vector2, bone_col: Color, bone_dark: Colo
 		draw_arc(center, rib_r, -PI * 0.05, PI * 0.45, 6, bone_col, 1.2)
 
 func _draw_skeleton_skull(c: Vector2, bone_col: Color, bone_dark: Color):
+	# Dark outline ring behind cranium
+	draw_circle(c, 5.2, _OUTLINE)
 	# Cranium
 	draw_circle(c, 4.5, bone_col)
 	# Highlight (top-left)
-	draw_circle(c + Vector2(-1.3, -1.5), 2.2, bone_col.lightened(0.25))
+	draw_circle(c + Vector2(-1.3, -1.5), 2.2, bone_col.lightened(0.30))
 	# Shadow side arc
-	draw_arc(c, 4.5, -PI * 0.1, PI * 0.6, 8, bone_col.darkened(0.30), 0.8)
+	draw_arc(c, 4.5, -PI * 0.1, PI * 0.6, 8, bone_col.darkened(0.35), 1.0)
 	# Jaw — open death grin
 	var jaw_pts := PackedVector2Array([
 		c + Vector2(-2.8, 1.0),
@@ -1399,24 +1761,35 @@ func _draw_skeleton_skull(c: Vector2, bone_col: Color, bone_dark: Color):
 	# Eye sockets
 	draw_circle(c + Vector2(-1.7, -1.0), 1.4, Color(0.05, 0.04, 0.05))
 	draw_circle(c + Vector2(1.7, -1.0), 1.4, Color(0.05, 0.04, 0.05))
-	# Glowing pupils
+	# Glowing pupils — eerie green/teal across all states
 	var eye_col: Color
+	var glow_col: Color
+	var flicker: float = 0.85 + 0.15 * sin(_anim_t * 11.0 + c.x)
 	match alert_state:
 		AlertState.UNAWARE:
-			eye_col = Color(0.2, 0.4, 0.8, 0.6)
+			eye_col = Color(0.20, 0.85, 0.70) * flicker
+			glow_col = Color(0.10, 0.95, 0.65, 0.22)
 		AlertState.SUSPICIOUS:
-			eye_col = Color(0.15, 0.85, 0.95)
+			eye_col = Color(0.15, 1.0, 0.75) * flicker
+			glow_col = Color(0.10, 1.0, 0.70, 0.30 + sin(_anim_t * 5.0) * 0.10)
 		AlertState.ALERT:
-			eye_col = Color(0.05, 1.0, 0.3)
-			# Outer glow
-			draw_arc(c + Vector2(-1.7, -1.0), 2.4, 0, TAU, 14,
-				Color(0.10, 1.0, 0.30, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.2)
-			draw_arc(c + Vector2(1.7, -1.0), 2.4, 0, TAU, 14,
-				Color(0.10, 1.0, 0.30, 0.30 + sin(_anim_t * 6.0) * 0.10), 1.2)
+			eye_col = Color(0.30, 1.0, 0.50)
+			glow_col = Color(0.20, 1.0, 0.45, 0.40 + sin(_anim_t * 7.0) * 0.15)
 		_:
-			eye_col = Color(0.3, 0.5, 0.6)
-	draw_circle(c + Vector2(-1.7, -1.0), 0.7, eye_col)
-	draw_circle(c + Vector2(1.7, -1.0), 0.7, eye_col)
+			eye_col = Color(0.20, 0.85, 0.70)
+			glow_col = Color(0.10, 0.85, 0.65, 0.25)
+	# Outer glow on both eyes (always present — Hades-style eerie aura)
+	draw_arc(c + Vector2(-1.7, -1.0), 2.6, 0, TAU, 16, glow_col, 1.4)
+	draw_arc(c + Vector2(1.7, -1.0), 2.6, 0, TAU, 16, glow_col, 1.4)
+	# Inner brighter halo
+	draw_circle(c + Vector2(-1.7, -1.0), 1.0, Color(glow_col.r, glow_col.g, glow_col.b, 0.45))
+	draw_circle(c + Vector2(1.7, -1.0), 1.0, Color(glow_col.r, glow_col.g, glow_col.b, 0.45))
+	# Pupil
+	draw_circle(c + Vector2(-1.7, -1.0), 0.75, eye_col)
+	draw_circle(c + Vector2(1.7, -1.0), 0.75, eye_col)
+	# Bright center
+	draw_circle(c + Vector2(-1.7, -1.0), 0.30, Color(0.85, 1.0, 0.95))
+	draw_circle(c + Vector2(1.7, -1.0), 0.30, Color(0.85, 1.0, 0.95))
 	# Cranial suture line
 	draw_line(c + Vector2(-2.5, -2.5), c + Vector2(2.5, -2.5), bone_dark, 0.4)
 	draw_line(c + Vector2(0, -4.0), c + Vector2(0, -2.3), bone_dark, 0.4)
@@ -1512,6 +1885,7 @@ func _draw_goblin_leg(hip: Vector2, foot: Vector2, pants_col: Color, sc: float):
 		foot + Vector2(w_bot, -1.0 * sc),
 		foot + Vector2(-w_bot, -1.0 * sc),
 	])
+	_outline_poly(leg_pts, 1.4)
 	draw_colored_polygon(leg_pts, pants_col)
 	draw_line(leg_pts[0], leg_pts[1], pants_col.lightened(0.25), 0.5)
 	draw_line(leg_pts[1], leg_pts[2], pants_col.darkened(0.30), 0.4)
@@ -1535,7 +1909,9 @@ func _draw_goblin_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, leath
 	var fr: Vector2 = c + Vector2(w, h * 0.5)
 	var tr: Vector2 = c + Vector2(w * 0.7, -h * 0.5)
 	var tl: Vector2 = c + Vector2(-w * 0.7, -h * 0.5)
-	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), leather_col)
+	var gob_torso := PackedVector2Array([fl, fr, tr, tl])
+	_outline_poly(gob_torso, 1.6)
+	draw_colored_polygon(gob_torso, leather_col)
 	# Top face (lightened)
 	draw_colored_polygon(PackedVector2Array([
 		tl, tr,
@@ -1574,6 +1950,7 @@ func _draw_goblin_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, skin_c
 		c + Vector2(-head_r * 1.4, head_r * 0.5),
 		c + Vector2(-head_r * 0.7, head_r * 0.2),
 	])
+	_outline_poly(ear_l, 1.4)
 	draw_colored_polygon(ear_l, skin_col.darkened(0.10))
 	# Inner ear pink
 	var ear_l_inner := PackedVector2Array([
@@ -1591,6 +1968,7 @@ func _draw_goblin_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, skin_c
 		c + Vector2(head_r * 1.4, head_r * 0.5),
 		c + Vector2(head_r * 0.7, head_r * 0.2),
 	])
+	_outline_poly(ear_r, 1.4)
 	draw_colored_polygon(ear_r, skin_col.darkened(0.10))
 	var ear_r_inner := PackedVector2Array([
 		c + Vector2(head_r * 0.7, -0.3),
@@ -1600,12 +1978,16 @@ func _draw_goblin_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, skin_c
 	])
 	draw_colored_polygon(ear_r_inner, Color(0.65, 0.30, 0.25))
 
-	# Head sphere
+	# Head sphere — with thick black outline
+	draw_circle(c, head_r + 0.8, _OUTLINE)
 	draw_circle(c, head_r, skin_col)
-	# Top lighter face
+	# Top lighter face (high contrast)
 	draw_circle(c + Vector2(-head_r * 0.25, -head_r * 0.3), head_r * 0.65, skin_light)
-	# Shadow side arc
-	draw_arc(c, head_r - 0.3, -PI * 0.1, PI * 0.6, 10, skin_col.darkened(0.25), 0.8)
+	# Shadow side arc — darker
+	draw_arc(c, head_r - 0.3, -PI * 0.1, PI * 0.6, 10, skin_col.darkened(0.40), 1.0)
+	# Brow ridge — mean squinting expression
+	draw_line(c + Vector2(-3.5 * sc, -2.0 * sc), c + Vector2(-0.5 * sc, -1.2 * sc), skin_col.darkened(0.45), 1.0)
+	draw_line(c + Vector2(3.5 * sc, -2.0 * sc), c + Vector2(0.5 * sc, -1.2 * sc), skin_col.darkened(0.45), 1.0)
 
 	# Eyes — LARGE
 	var eye_r: float = 1.8 * sc
@@ -1740,6 +2122,7 @@ func _draw_gnoll_leg(hip: Vector2, paw: Vector2, fur_col: Color, fur_dark: Color
 		knee + Vector2(1.4 * sc, 0),
 		knee + Vector2(-1.4 * sc, 0),
 	])
+	_outline_poly(thigh_pts, 1.6)
 	draw_colored_polygon(thigh_pts, fur_col)
 	draw_line(thigh_pts[0], thigh_pts[1], fur_light, 0.6)
 	draw_line(thigh_pts[1], thigh_pts[2], fur_dark.darkened(0.20), 0.5)
@@ -1750,6 +2133,7 @@ func _draw_gnoll_leg(hip: Vector2, paw: Vector2, fur_col: Color, fur_dark: Color
 		ankle + Vector2(0.9 * sc, 0),
 		ankle + Vector2(-0.9 * sc, 0),
 	])
+	_outline_poly(shin_pts, 1.4)
 	draw_colored_polygon(shin_pts, fur_col.darkened(0.10))
 	# Foot/paw — wide with 3 toe nubs
 	var paw_pts := PackedVector2Array([
@@ -1778,7 +2162,15 @@ func _draw_gnoll_torso(c: Vector2, f: Vector2, perp2: Vector2, sc: float, fur_co
 	var fr: Vector2 = c + Vector2(w, h * 0.5)
 	var tr: Vector2 = c + Vector2(w * 0.85, -h * 0.5)
 	var tl: Vector2 = c + Vector2(-w * 0.85, -h * 0.5)
-	draw_colored_polygon(PackedVector2Array([fl, fr, tr, tl]), fur_col)
+	var gnoll_torso := PackedVector2Array([fl, fr, tr, tl])
+	_outline_poly(gnoll_torso, 2.0)
+	draw_colored_polygon(gnoll_torso, fur_col)
+	# Fur stroke texture — short lines giving directional fur
+	for fi in range(14):
+		var rx: float = -w * 0.85 + float((fi * 41) % 100) / 100.0 * w * 1.7
+		var ry: float = -h * 0.45 + float((fi * 67) % 100) / 100.0 * h * 0.9
+		var fs: Vector2 = c + Vector2(rx, ry)
+		draw_line(fs, fs + Vector2(0.3, 1.2), fur_dark, 0.4)
 	# Top face
 	draw_colored_polygon(PackedVector2Array([
 		tl, tr,
@@ -1829,6 +2221,7 @@ func _draw_gnoll_mane(neck: Vector2, sc: float, fur_col: Color, fur_light: Color
 		if sin(a) < 0:
 			r *= 1.2
 		pts.append(neck + Vector2(cos(a) * r * 1.3, sin(a) * r * 0.7))
+	_outline_poly(pts, 1.4)
 	draw_colored_polygon(pts, fur_light)
 	# Inner darker
 	var inner := PackedVector2Array()
@@ -1848,6 +2241,7 @@ func _draw_gnoll_arm(shoulder: Vector2, is_left: bool, fur_col: Color, fur_dark:
 		elbow + Vector2(1.4 * sc, 0),
 		elbow + Vector2(-1.4 * sc, 0),
 	])
+	_outline_poly(ua_pts, 1.5)
 	draw_colored_polygon(ua_pts, fur_col)
 	draw_line(ua_pts[0], ua_pts[1], fur_col.lightened(0.20), 0.5)
 	# Forearm
@@ -1857,6 +2251,7 @@ func _draw_gnoll_arm(shoulder: Vector2, is_left: bool, fur_col: Color, fur_dark:
 		wrist + Vector2(1.0 * sc, 0),
 		wrist + Vector2(-1.0 * sc, 0),
 	])
+	_outline_poly(fa_pts, 1.4)
 	draw_colored_polygon(fa_pts, fur_dark)
 	# Spot
 	draw_circle(elbow + Vector2(0, 1.0), 0.7 * sc, fur_dark.darkened(0.20))
@@ -1879,7 +2274,16 @@ func _draw_gnoll_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, fur_col
 		c + Vector2(-3.0 * sc, 2.0 * sc),
 		c + Vector2(-3.5 * sc, 0),
 	])
+	_outline_poly(head_pts, 1.8)
 	draw_colored_polygon(head_pts, fur_col)
+	# Fur stroke texture on head
+	for i in range(8):
+		var fa: float = float(i) / 8.0 * TAU
+		var fx: float = cos(fa) * 2.5 * sc
+		var fy: float = sin(fa) * 1.8 * sc
+		var fs: Vector2 = c + Vector2(fx, fy)
+		var fe: Vector2 = fs + Vector2(fx, fy).normalized() * 0.8 * sc
+		draw_line(fs, fe, fur_dark, 0.4)
 	# Top lighter
 	draw_colored_polygon(PackedVector2Array([
 		c + Vector2(-3.0 * sc, -2.5 * sc),
@@ -1921,13 +2325,19 @@ func _draw_gnoll_head(c: Vector2, f: Vector2, perp2: Vector2, sc: float, fur_col
 		c + Vector2(1.5 * sc, 4.5 * sc),
 		c + Vector2(-1.5 * sc, 4.5 * sc),
 	])
+	_outline_poly(snout_pts, 1.5)
 	draw_colored_polygon(snout_pts, fur_col.darkened(0.10))
 	draw_line(snout_pts[0], snout_pts[1], fur_light, 0.5)
 	draw_line(snout_pts[1], snout_pts[2], fur_dark, 0.5)
 
-	# Wet nose
-	draw_circle(c + Vector2(0, 4.2 * sc), 0.9 * sc, Color(0.10, 0.06, 0.08))
-	draw_circle(c + Vector2(-0.3 * sc, 4.0 * sc), 0.3, Color(0.55, 0.50, 0.45))
+	# Wet nose — large with two nostril dots
+	draw_circle(c + Vector2(0, 4.2 * sc), 1.1 * sc, _OUTLINE)
+	draw_circle(c + Vector2(0, 4.2 * sc), 0.95 * sc, Color(0.08, 0.05, 0.07))
+	# Wet shine highlight
+	draw_circle(c + Vector2(-0.35 * sc, 3.95 * sc), 0.35, Color(0.60, 0.55, 0.50))
+	# Nostrils
+	draw_circle(c + Vector2(-0.45 * sc, 4.3 * sc), 0.18 * sc, Color(0.02, 0.01, 0.02))
+	draw_circle(c + Vector2(0.45 * sc, 4.3 * sc), 0.18 * sc, Color(0.02, 0.01, 0.02))
 
 	# Mouth with fangs
 	draw_line(c + Vector2(-1.4 * sc, 3.0 * sc), c + Vector2(1.4 * sc, 3.0 * sc), Color(0.10, 0.06, 0.06), 0.7)
@@ -1987,6 +2397,7 @@ func _draw_gnoll_axe(hand: Vector2, sc: float):
 		head_c + Vector2(-3.0 * sc, 2.5 * sc),
 		head_c + Vector2(-3.5 * sc, 0.5 * sc),
 	])
+	_outline_poly(axe_pts, 1.8)
 	draw_colored_polygon(axe_pts, Color(0.42, 0.40, 0.45))
 	# Highlight edge
 	draw_line(axe_pts[0], axe_pts[1], Color(0.75, 0.73, 0.78), 0.7)
@@ -2005,6 +2416,75 @@ func _draw_gnoll_axe(hand: Vector2, sc: float):
 	# Binding rope at shaft
 	draw_line(shaft_top + Vector2(-1.0, 1.5), shaft_top + Vector2(1.0, 1.5), Color(0.20, 0.14, 0.08), 0.6)
 	draw_line(shaft_top + Vector2(-1.0, 2.3), shaft_top + Vector2(1.0, 2.3), Color(0.20, 0.14, 0.08), 0.6)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUARD WEAPON SILHOUETTE — drawn at hand position, visible while guard is alive
+# ─────────────────────────────────────────────────────────────────────────────
+func _draw_guard_weapon(f: Vector2, perp: Vector2) -> void:
+	if dropped_weapon == "NONE":
+		return
+	var sc: float = 1.40 if is_boss else (1.20 if is_captain else 1.0)
+	# Hand position: forward + offset to right shoulder area
+	var hand: Vector2 = f * 4.0 * sc + perp * 3.5 * sc + Vector2(0, -5.0 * sc)
+	var wdata: Dictionary = GameManager.WEAPONS.get(dropped_weapon, {})
+	var wcol: Color = wdata.get("color", Color(0.70, 0.65, 0.55))
+	var a := wcol.a
+	# Subtle outline so weapon reads against guard body
+	var outline := Color(0.05, 0.04, 0.06, 0.85)
+	match dropped_weapon:
+		"LONGSWORD", "BROADSWORD", "BLADESONG":
+			# Long sword held upright — blade extends forward-up
+			var tip:  Vector2 = hand + f * 7.0 * sc - Vector2(0, 3.0 * sc)
+			var base: Vector2 = hand - f * 2.0 * sc
+			draw_line(base, tip, outline, 2.8)
+			draw_line(base, tip, Color(wcol.r, wcol.g, wcol.b, 0.90), 1.8)
+			# Crossguard
+			var cg: Vector2 = hand + f * 0.5 * sc
+			draw_line(cg - perp * 2.5 * sc, cg + perp * 2.5 * sc, outline, 2.2)
+			draw_line(cg - perp * 2.5 * sc, cg + perp * 2.5 * sc, Color(0.55, 0.50, 0.45, 0.85), 1.4)
+			# Blade edge highlight
+			draw_line(hand + f * 2.0 * sc, tip, Color(1.0, 0.95, 0.80, 0.70), 0.6)
+		"SPEAR":
+			# Long pole — extends far forward
+			var butt: Vector2 = hand - f * 3.0 * sc
+			var stip: Vector2 = hand + f * 9.0 * sc - Vector2(0, 2.0 * sc)
+			draw_line(butt, stip, outline, 2.0)
+			draw_line(butt, stip, Color(0.45, 0.32, 0.18, 0.85), 1.2)  # shaft
+			# Spearhead
+			var sh_base: Vector2 = hand + f * 7.5 * sc - Vector2(0, 1.5 * sc)
+			draw_line(sh_base - perp * 1.2 * sc, stip, outline, 2.4)
+			draw_line(sh_base - perp * 1.2 * sc, stip, Color(wcol.r, wcol.g, wcol.b, 0.90), 1.6)
+			draw_line(sh_base + perp * 0.8 * sc, stip, Color(wcol.r, wcol.g, wcol.b, 0.75), 1.0)
+		"WAR_PICK":
+			# Heavy axe — compact, head perpendicular
+			var wbase: Vector2 = hand
+			var wend:  Vector2 = hand + f * 4.0 * sc
+			draw_line(hand - f * 1.5 * sc, wend, outline, 2.8)
+			draw_line(hand - f * 1.5 * sc, wend, Color(0.45, 0.32, 0.18, 0.85), 1.6)
+			# Pick head
+			draw_line(wend - perp * 2.8 * sc, wend + perp * 1.6 * sc, outline, 3.0)
+			draw_line(wend - perp * 2.8 * sc, wend + perp * 1.6 * sc, Color(wcol.r, wcol.g, wcol.b, 0.90), 2.0)
+			draw_circle(wend - perp * 2.8 * sc, 1.2 * sc, Color(wcol.r, wcol.g, wcol.b, 0.80))
+		"WAND":
+			# Wand — short slender rod with glowing tip
+			var wtip: Vector2 = hand + f * 5.0 * sc - Vector2(0, 2.5 * sc)
+			draw_line(hand - f * 1.0 * sc, wtip, outline, 2.0)
+			draw_line(hand - f * 1.0 * sc, wtip, Color(0.35, 0.26, 0.18, 0.85), 1.2)
+			# Magic orb tip
+			var glow_col := Color(wcol.r, wcol.g, wcol.b, 0.55 + sin(_anim_t * 4.0) * 0.25)
+			draw_circle(wtip, 2.2 * sc, glow_col)
+			draw_circle(wtip, 1.2 * sc, Color(1.0, 1.0, 1.0, 0.55))
+		"SHIV", "STILETTO", "ASSASSIN_FANG":
+			# Short dagger — compact, low profile
+			var dtip: Vector2 = hand + f * 3.5 * sc - Vector2(0, 1.0 * sc)
+			draw_line(hand, dtip, outline, 2.0)
+			draw_line(hand, dtip, Color(wcol.r, wcol.g, wcol.b, 0.85), 1.2)
+			draw_circle(dtip, 0.9 * sc, Color(1.0, 0.95, 0.80, 0.80))
+		_:
+			# Generic blade
+			var gtip: Vector2 = hand + f * 5.0 * sc - Vector2(0, 2.0 * sc)
+			draw_line(hand - f * 1.0 * sc, gtip, outline, 2.2)
+			draw_line(hand - f * 1.0 * sc, gtip, Color(wcol.r, wcol.g, wcol.b, 0.80), 1.4)
 
 func _is_blocked(target_pos: Vector2) -> bool:
 	var space = get_world_2d().direct_space_state

@@ -23,6 +23,12 @@ func is_in_range(pos: Vector2) -> bool:
 func interact(player: Node2D):
 	if _disarmed:
 		return
+	# DISARM_TOOL (Thieves' Tools trinket): always succeeds silently
+	if GameManager.has_gear_effect("DISARM_TOOL"):
+		_disarmed = true
+		queue_redraw()
+		AudioManager.step_quiet()
+		return
 	var roll: int = GameManager.roll_d20()
 	# Dwarf stonecunning: always succeeds
 	if GameManager.selected_race == "DWARF":
@@ -110,16 +116,18 @@ func _spawn_ripple(level: int):
 func _draw():
 	var player = get_tree().get_first_node_in_group("player")
 	var near_sneaking := false
+	var dwarf_sense   := false
 	if player:
 		var dist = global_position.distance_to(player.global_position)
 		near_sneaking = dist <= SENSE_RANGE and player.get("is_sneaking") == true
+		dwarf_sense   = dist <= SENSE_RANGE and GameManager.selected_race == "DWARF"
 
 	var plate_color: Color
 	if _disarmed:
 		plate_color = Color(0.25, 0.55, 0.30)
 	elif _flash_active:
 		plate_color = Color(1.0, 0.15, 0.15)
-	elif near_sneaking:
+	elif near_sneaking or dwarf_sense:
 		plate_color = Color(0.7, 0.65, 0.2)
 	else:
 		plate_color = Color(0.45, 0.45, 0.45)

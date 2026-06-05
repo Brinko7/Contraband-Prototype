@@ -6,9 +6,19 @@ var weapon_id: String = "NONE"
 var _timer: float = 28.0
 var _bob_t: float = 0.0
 
-func setup(wid: String):
-	weapon_id = wid
+# Entry animation: weapon slides + spins briefly on spawn
+const _SLIDE_DUR: float = 0.40
+var _slide_t:   float   = _SLIDE_DUR
+var _slide_dir: Vector2 = Vector2.ZERO
+var _slide_spin: float  = 0.0
+
+func setup(wid: String, spawn_dir: Vector2 = Vector2.ZERO):
+	weapon_id  = wid
 	add_to_group("interactable")
+	if spawn_dir != Vector2.ZERO:
+		_slide_dir  = spawn_dir.normalized()
+		_slide_t    = _SLIDE_DUR
+		_slide_spin = randf_range(6.0, 12.0) * (1.0 if randf() > 0.5 else -1.0)
 
 func _process(delta: float):
 	_timer -= delta
@@ -16,6 +26,12 @@ func _process(delta: float):
 		queue_free()
 		return
 	_bob_t += delta
+	if _slide_t > 0.0:
+		_slide_t -= delta
+		# Slide the node itself so it physically moves
+		if _slide_dir != Vector2.ZERO:
+			var frac: float = _slide_t / _SLIDE_DUR
+			position += _slide_dir * 28.0 * delta * frac * frac
 	queue_redraw()
 
 func is_in_range(pos: Vector2) -> bool:
@@ -39,11 +55,17 @@ func interact(player: Node):
 	queue_free()
 
 func _draw():
-	var bob: float = sin(_bob_t * 2.8) * 1.8
+	var bob: float = sin(_bob_t * 2.8) * 1.8 if _slide_t <= 0.0 else 0.0
 	var col: Color = _get_weapon_color()
 	var alpha: float = min(1.0, _timer * 0.5)
 	if _timer < 2.0:
 		alpha = _timer * 0.5
+
+	# Spin during entry slide
+	if _slide_t > 0.0 and _slide_dir != Vector2.ZERO:
+		var spin_frac: float = 1.0 - (_slide_t / _SLIDE_DUR)
+		var spin_angle: float = _slide_spin * spin_frac * PI
+		draw_set_transform(Vector2.ZERO, spin_angle, Vector2.ONE)
 
 	var offset := Vector2(0, bob)
 
@@ -81,10 +103,14 @@ func _draw():
 			draw_line(offset + Vector2(-3, 2), offset + Vector2(3, -2),
 				Color(col.r, col.g, col.b, alpha), 1.8)
 
-	# Pickup prompt flash
-	if _timer > 2.0:
+	# Pickup prompt flash (only once settled)
+	if _timer > 2.0 and _slide_t <= 0.0:
 		var pulse: float = (sin(_bob_t * 4.0) + 1.0) * 0.5
 		draw_arc(offset, 8.0, 0, TAU, 16, Color(1.0, 1.0, 0.80, pulse * 0.18 * alpha), 1.0)
+
+	# Reset spin transform
+	if _slide_t > 0.0 and _slide_dir != Vector2.ZERO:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 func _get_weapon_color() -> Color:
 	var wdata: Dictionary = GameManager.WEAPONS.get(weapon_id, {})

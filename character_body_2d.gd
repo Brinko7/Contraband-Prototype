@@ -64,6 +64,9 @@ var _ghost_blade_strikes_left := 0       # GHOST_BLADE: 3/floor; VOID_REAPER: 5/
 var _venom_needle_uses_left   := 2       # VENOM_NEEDLE
 var _runed_blade_charges      := 0       # RUNED_BLADE: fills on kills, 3=shadow step
 var _garrote_hold_timer       := 0.0     # GARROTE: requires 2s hold on target
+var _throwing_knives_left     := 3       # THROW_STUN offhand: 3/floor
+var _nerve_steel_ready        := true    # NERVE_STEEL: first hit each floor always crits
+var _set_iron_save_ready      := true    # SET_IRON: failed takedown no-alert once/floor
 
 # Gear slots
 var gear: Dictionary = { "boots": "", "cloak": "", "offhand": "", "trinket": "" }
@@ -103,6 +106,10 @@ var _hitstop_t:    float   = 0.0            # > 0 = freeze _process logic (visua
 
 # Room tracking — triggers patrol preview on first entry
 var _last_room: int = -1
+
+# Coin Toss passive — delayed second noise burst
+var _coin_echo_timer: float = 0.0
+var _coin_echo_pos:   Vector2 = Vector2.ZERO
 
 # Pebble throw — free distraction, quiet noise, 6s cooldown
 var _pebble_cooldown: float = 0.0
@@ -246,6 +253,10 @@ func reset_floor_charges():
 	# QUICKSILVER FLASK: recharge per-floor active ability
 	_quicksilver_active        = false
 	_quicksilver_timer         = 0.0
+	_throwing_knives_left      = 3
+	_nerve_steel_ready         = true
+	_set_iron_save_ready       = true
+	_shadow_veil_was_in_shadow = false
 
 func _auto_equip_all():
 	equipped = [-1, -1, -1]
@@ -401,8 +412,18 @@ func _process(delta):
 		_dodge_cooldown -= delta
 	if _pebble_cooldown > 0.0:
 		_pebble_cooldown -= delta
+	if _coin_echo_timer > 0.0:
+		_coin_echo_timer -= delta
+		if _coin_echo_timer <= 0.0:
+			_emit_noise_at(NoiseLevel.LOUD, _coin_echo_pos)
 	# Room entry: trigger patrol preview for guards in the newly entered room
 	_check_room_entry()
+	# SHADOW_VEIL: entering shadow resets all detection bars
+	if GameManager.has_passive("SHADOW_VEIL") and is_sneaking:
+		_check_shadow_veil()
+	# VOID_CLOAK relic: same effect but always (not just while sneaking)
+	if GameManager.has_relic("VOID_CLOAK"):
+		_check_shadow_veil()
 	if _dodge_iframes > 0.0:
 		_dodge_iframes -= delta
 	if _parry_t > 0.0:
@@ -453,6 +474,13 @@ func _process(delta):
 					_emit_movement_noise()
 				var base_walk: float  = WALK_COOLDOWN  * (0.80 if GameManager.has_passive("QUICK_HANDS") else 1.0)
 				var base_sneak: float = SNEAK_COOLDOWN * (0.80 if GameManager.has_passive("QUICK_HANDS") else 1.0)
+				# FAST_SNEAK (Swift Slippers): sneak speed equals walk speed
+				if has_gear("FAST_SNEAK"):
+					base_sneak = base_walk
+				# FAST_SNEAK also gives -15% cooldown
+				if has_gear("FAST_SNEAK"):
+					base_walk  *= 0.85
+					base_sneak *= 0.85
 				var no_slow: bool = GameManager.has_passive("DEAD_WEIGHT") or has_gear("BODY_CARRY")
 				var body_mult := (1.0 if no_slow else 1.4) if is_carrying_body else 1.0
 				var limp_mult   := 1.4 if is_limping else 1.0
@@ -590,6 +618,17 @@ func _pickup_body(body: Node):
 	body.set_meta("being_carried", true)
 	_popup("Seized body", Color(0.85, 0.55, 0.30))
 	AudioManager.body_pickup()
+	if GameManager.has_passive("BODY_SNATCHER"):
+		var nearest: Node = null
+		var best_dist := 999.0
+		for g in get_tree().get_nodes_in_group("guards"):
+			var d := global_position.distance_to(g.global_position)
+			if d < best_dist:
+				best_dist = d
+				nearest = g
+		if nearest and is_instance_valid(nearest):
+			nearest.set("detection_progress", 0.0)
+			_popup("Body Snatcher — bar reset!", Color(0.35, 0.55, 0.35))
 
 func _drop_body():
 	if _carried_body and is_instance_valid(_carried_body):
@@ -734,6 +773,28 @@ func _resolve_takedown(guard):
 		return
 
 	# ── d20 roll ─────────────────────────────────────────────────────────────────
+	# ASSASSIN_MARK relic: once per floor, auto-succeed the next takedown
+	if GameManager.has_relic("ASSASSIN_MARK") and not GameManager._assassin_mark_used:
+		GameManager._assassin_mark_used = true
+		_popup("ASSASSIN'S MARK — Guaranteed Kill!", Color(0.85, 0.15, 0.15))
+		guard.takedown(behind and weapon in ["STILETTO", "ASSASSIN_FANG", "GHOST_BLADE", "VOID_REAPER"])
+		GameManager.record_takedown(not behind)
+		_post_kill_effects(guard, behind)
+		_spawn_attack_anim(behind)
+		GameManager.shake(2.0, 0.18)
+		AudioManager.takedown()
+		return
+	# NERVE_STEEL: first hit each floor automatically crits
+	if GameManager.has_passive("NERVE_STEEL") and _nerve_steel_ready:
+		_nerve_steel_ready = false
+		_popup("NERVE OF STEEL — First Blood CRIT!", Color(0.90, 0.30, 0.20))
+		guard.takedown(behind and weapon in ["STILETTO", "ASSASSIN_FANG"])
+		GameManager.record_takedown(not behind)
+		GameManager.add_gold(100)
+		_post_kill_effects(guard, behind)
+		_spawn_attack_anim(behind)
+		GameManager.shake(1.8, 0.15)
+		return
 	var roll1: int = randi_range(1, 20)
 	var roll2: int = randi_range(1, 20)
 	var has_advantage:    bool = behind or is_sneaking
@@ -756,8 +817,16 @@ func _resolve_takedown(guard):
 	if weapon == "GARROTE" and not behind:           roll = max(1, roll - 4)
 	if weapon == "ASSASSIN_FANG":                    roll = min(20, roll + 3)
 	# Gear modifiers
-	if has_gear("SET_THIEF"):                        roll = min(20, roll + 3)
+	if GameManager.has_set_bonus("SET_THIEF"):       roll = min(20, roll + 3)
 	if has_gear("PATROL_SIGHT"):                     roll = min(20, roll + 1)
+	# OPPORTUNIST: side angle gives +3
+	if GameManager.has_passive("OPPORTUNIST") and not behind:
+		var to_guard: Vector2 = (guard.global_position - global_position).normalized()
+		var g_facing: Vector2 = guard.get("facing") if guard.get("facing") != null else Vector2.RIGHT
+		var dot_side: float = absf(g_facing.dot(to_guard))
+		if dot_side < 0.6:   # roughly perpendicular = side attack
+			roll = min(20, roll + 3)
+			_popup("OPPORTUNIST! Side attack +3", Color(0.75, 0.85, 0.35))
 	if GameManager.get_guild_unlock("MASTERTHIEF") and raw == 1:
 		roll = max(roll, 5)
 	if weapon == "ASSASSIN_FANG" and raw == 1:
@@ -795,7 +864,10 @@ func _resolve_takedown(guard):
 		var silent_kill := behind and weapon in ["STILETTO", "ASSASSIN_FANG"]
 		_popup("d20: %d  ✓ Clean%s" % [roll, " (silent)" if silent_kill else ""], Color(0.30, 1.00, 0.50))
 		guard.takedown(silent_kill)
-		GameManager.record_takedown(not behind)
+		GameManager.record_takedown(not behind, not is_sneaking)
+		if cls == "ASSASSIN" and not behind:
+			GameManager.add_gold(120)
+			_popup("+120 gp  CONTRACT KILL", Color(0.85, 0.15, 0.15))
 		_post_kill_effects(guard, silent_kill)
 		_spawn_attack_anim(silent_kill)
 		GameManager.shake(2.0, 0.18)
@@ -803,7 +875,7 @@ func _resolve_takedown(guard):
 	elif roll >= threshold_miss:
 		_popup("d20: %d  ~ Messy" % roll, Color(1.00, 0.75, 0.20))
 		guard.takedown(false)
-		GameManager.record_takedown(not behind)
+		GameManager.record_takedown(not behind, not is_sneaking)
 		_post_kill_effects(guard, false)
 		_spawn_attack_anim(false)
 		GameManager.shake(3.5, 0.28)
@@ -829,6 +901,13 @@ func _resolve_takedown(guard):
 		elif GameManager.has_passive("SECOND_WIND") and not GameManager.second_wind_used:
 			GameManager.second_wind_used = true
 			_popup("d20: %d  GRAZE — Second Wind!" % roll, Color(0.30, 0.80, 0.55))
+			if guard.has_method("_become_suspicious"):
+				guard._become_suspicious(global_position)
+			if guard.has_method("stagger"):
+				guard.stagger(0.8)
+		elif GameManager.has_set_bonus("SET_IRON") and _set_iron_save_ready:
+			_set_iron_save_ready = false
+			_popup("d20: %d  IRON RESOLVE — no alarm!" % roll, Color(0.65, 0.65, 0.70))
 			if guard.has_method("_become_suspicious"):
 				guard._become_suspicious(global_position)
 			if guard.has_method("stagger"):
@@ -888,7 +967,12 @@ func _do_combat_attack():
 
 	# Melee shapes: jab / slash / thrust
 	_start_lunge()
+	var melee_nat20 := randi_range(1, 20) == 20
 	var hit_guards := _get_attack_tiles(shape)
+	# BLADESONG NAT20: second arc hits a wider zone
+	if weapon == "BLADESONG" and melee_nat20:
+		hit_guards.append_array(_get_attack_tiles("slash"))
+		_popup("NAT20  BLADESONG — Twin Arc!", Color(0.65, 0.85, 1.00))
 	var hit_any := false
 	for guard in hit_guards:
 		if not guard.has_method("hurt"):
@@ -918,18 +1002,28 @@ func _do_combat_attack():
 			elif weapon in ["LONGSWORD", "BROADSWORD", "BLADESONG"]:
 				_attack_cooldown = max(0.0, _attack_cooldown - 0.20)
 
+	# BROADSWORD NAT20: stagger all nearby enemies
+	if weapon == "BROADSWORD" and melee_nat20 and hit_any:
+		_popup("NAT20  BROADSWORD — Stagger All!", Color(0.90, 0.82, 0.60))
+		for g in get_tree().get_nodes_in_group("guards"):
+			if is_instance_valid(g) and global_position.distance_to(g.global_position) <= 80.0:
+				if g.has_method("stagger"):
+					g.stagger(1.2)
+
 	# Jab weapons: Quick Combo — every 3rd combo hit resets cooldown
 	if shape == "jab" and hit_any and GameManager.combo_hits > 0 and GameManager.combo_hits % 3 == 0:
 		_attack_cooldown = 0.0
 		_popup("QUICK COMBO!", Color(0.95, 0.80, 0.20))
 
 	var noise_r: float = cdata["noise_r"]
-	if noise_r > 0.0:
+	# BLADESONG: slash is silent when player is in shadow
+	var bladesong_silent := weapon == "BLADESONG" and _is_in_shadow()
+	if noise_r > 0.0 and not bladesong_silent:
 		emit_noise(NoiseLevel.LOUD)
 	else:
 		emit_noise(NoiseLevel.QUIET)
 
-	_spawn_attack_anim(noise_r == 0.0)
+	_spawn_attack_anim(noise_r == 0.0 or bladesong_silent)
 	if hit_any:
 		_trigger_hitstop()
 		GameManager.shake(2.5, 0.16)
@@ -986,12 +1080,15 @@ func _try_dodge():
 			break
 		final_pos = target
 	position       = final_pos
-	_dodge_cooldown = _DODGE_CD
+	_dodge_cooldown = _DODGE_CD * (0.60 if GameManager.has_passive("SLIPPERY") else 1.0)
 	_dodge_iframes  = _DODGE_IFRAMES
 	_start_slide(facing)
 	emit_noise(NoiseLevel.SILENT)
 	_popup("ROLL", Color(0.45, 0.75, 1.0))
 	GameManager.shake(0.8, 0.06)
+	# SMOKE_SOUL relic: leave a smoke trail after dash
+	if GameManager.has_relic("SMOKE_SOUL"):
+		_spawn_smoke_at(position)
 
 func _do_charged_attack():
 	var cdata: Dictionary = GameManager.WEAPON_COMBAT.get(weapon, GameManager.WEAPON_COMBAT["NONE"])
@@ -1181,6 +1278,10 @@ func _post_kill_effects(guard, was_silent: bool):
 			if g != guard and global_position.distance_to(g.global_position) <= 80.0:
 				var cur: float = g.get("detection_progress")
 				g.set("detection_progress", max(0.0, cur - 0.3))
+	# KILL_VANISH (Assassin's Shroud): go invisible for 2s after any kill
+	if has_gear("KILL_VANISH"):
+		GameManager._vanish_active = true
+		GameManager._vanish_timer  = 2.0
 	# Wanted level: clear if all aware guards are gone and no bodies discovered
 	GameManager.check_wanted_decay(get_tree())
 	# Room-clear bonus: if no living guards remain in the room of the kill, award +50 gp
@@ -1249,6 +1350,25 @@ func _runed_blade_shadow_step():
 		_popup("RUNED BLADE — Shadow Step!", Color(0.50, 0.20, 0.80))
 		GameManager.shake(1.5, 0.10)
 		AudioManager.ability_use()
+
+var _shadow_veil_was_in_shadow := false
+
+func _is_in_shadow() -> bool:
+	for torch in get_tree().get_nodes_in_group("torches"):
+		if torch.get("is_lit") and global_position.distance_to(torch.global_position) < 48.0:
+			return false
+	return true
+
+func _check_shadow_veil():
+	var in_shadow := _is_in_shadow()
+	# Only trigger on transition into shadow
+	if in_shadow and not _shadow_veil_was_in_shadow:
+		for g in get_tree().get_nodes_in_group("guards"):
+			var dp: float = g.get("detection_progress") if g.get("detection_progress") != null else 0.0
+			if dp > 0.0:
+				g.set("detection_progress", 0.0)
+		_popup("SHADOW VEIL", Color(0.40, 0.20, 0.70))
+	_shadow_veil_was_in_shadow = in_shadow
 
 # ── Class abilities ───────────────────────────────────────────────────────────
 func _use_class_ability():
@@ -1333,7 +1453,10 @@ func _ability_shadow_step():
 	_popup("SHADOW STEP", Color(0.55, 0.30, 0.95))
 	GameManager.shake(1.0, 0.08)
 	AudioManager.ability_use()
-	ability_cooldown = ABILITY_COOLDOWNS["SHADOWDANCER"] * (0.70 if GameManager.has_passive("COLD_BLOOD") else 1.0)
+	var _sd_mult := 0.70 if GameManager.has_passive("COLD_BLOOD") else 1.0
+	if GameManager.has_passive("SHADOW_STEP_MASTERY"):
+		_sd_mult *= 0.50
+	ability_cooldown = ABILITY_COOLDOWNS["SHADOWDANCER"] * _sd_mult
 
 func _ability_mark_target():
 	if _assassin_mark != null and is_instance_valid(_assassin_mark):
@@ -1485,8 +1608,20 @@ func _throw_coin():
 	var tiles := 7 if GameManager.selected_class == "CUTPURSE" else 5
 	var throw_pos := global_position + facing * TILE_SIZE * tiles
 	_emit_noise_at(NoiseLevel.LOUD, throw_pos)
-	_popup("Coin tossed!%s" % (" (+range)" if tiles == 7 else ""), ITEM_DATA[ItemType.COIN].color)
+	var label := "Coin tossed!%s" % (" (+range)" if tiles == 7 else "")
+	if GameManager.has_passive("COIN_TOSS"):
+		# Second and third noise burst attract more guards over time
+		_coin_echo_pos   = throw_pos
+		_coin_echo_timer = 2.5
+		_emit_noise_at(NoiseLevel.LOUD, throw_pos + Vector2(randf_range(-8, 8), randf_range(-8, 8)))
+		label += "  (echo)"
+	_popup(label, ITEM_DATA[ItemType.COIN].color)
 	AudioManager.coin_throw()
+
+func _spawn_smoke_at(pos: Vector2) -> void:
+	var cloud := _smoke_scene.instantiate()
+	cloud.global_position = pos
+	get_tree().root.add_child(cloud)
 
 func _deploy_smoke():
 	var cloud := _smoke_scene.instantiate()
@@ -1494,6 +1629,11 @@ func _deploy_smoke():
 	get_tree().root.add_child(cloud)
 	_popup("Smoke deployed!", ITEM_DATA[ItemType.SMOKE].color)
 	AudioManager.smoke_pop()
+	# SET_SHADOW: ghost on smoke — brief vanish within cloud
+	if GameManager.has_set_bonus("SET_SHADOW"):
+		GameManager._vanish_active = true
+		GameManager._vanish_timer  = 3.0
+		_popup("Shadow Sovereign — Ghost!", Color(0.55, 0.25, 0.90))
 
 func _fire_dart() -> bool:
 	var dart_range := 150.0
@@ -1757,11 +1897,34 @@ func _try_use_offhand_active():
 		get_tree().root.add_child(cloud)
 		_popup("MINI-SMOKE — instant!", Color(0.42, 0.58, 0.42))
 		AudioManager.smoke_pop()
+	elif has_gear("THROW_STUN") and _throwing_knives_left > 0:
+		# Find nearest guard in 100px range
+		var nearest: Node = null
+		var nearest_d := 100.0
+		for g in get_tree().get_nodes_in_group("guards"):
+			if not is_instance_valid(g): continue
+			var d: float = global_position.distance_to((g as Node2D).global_position)
+			if d < nearest_d:
+				nearest_d = d
+				nearest = g
+		if nearest != null:
+			_throwing_knives_left -= 1
+			nearest.set("alert_state", 0)
+			nearest.set("detection_progress", 0.0)
+			var stun_t: float = nearest.get("de_escalate_timer") if nearest.get("de_escalate_timer") != null else 0.0
+			nearest.set("de_escalate_timer", max(stun_t, 3.0))
+			_popup("THROWING KNIFE — stunned! (%d left)" % _throwing_knives_left, Color(0.72, 0.72, 0.80))
+			AudioManager.knife_throw() if AudioManager.has_method("knife_throw") else AudioManager.ability_use()
+		else:
+			_popup("No guard in range", Color(0.55, 0.50, 0.45))
 
 # ── Noise ─────────────────────────────────────────────────────────────────────
 func _emit_movement_noise():
 	# Wood Elf — always moves silently
 	if GameManager.selected_race == "WOOD_ELF":
+		return
+	# PHANTOM_BOOTS relic: walking never makes noise
+	if GameManager.has_relic("PHANTOM_BOOTS"):
 		return
 	var level: NoiseLevel
 	if is_sneaking or is_carrying_body:
@@ -1836,6 +1999,13 @@ func _draw():
 				var b: Vector2 = pts[(i + 1) % pts.size()] - global_position
 				draw_line(a, b, trail_col, 1.0)
 				draw_circle(a, 2.5, trail_col)
+
+	# ── Ground shadow ellipse (drawn first so body renders on top) ───────────
+	if not is_hidden:
+		var shadow_alpha: float = 0.35 if not is_sneaking else 0.18
+		draw_set_transform(vis + Vector2(1.5, 5.0), 0.0, Vector2(1.0, 0.38))
+		draw_circle(Vector2.ZERO, 7.0, Color(0.0, 0.0, 0.0, shadow_alpha))
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2(1.0, 1.0))
 
 	# ── Character body ─────────────────────────────────────────────────────────
 	if is_hidden:
@@ -1983,9 +2153,14 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 	# Lunge state
 	var lunging: bool = lunge_t > 0.0
 
-	# ── A. Ground shadow ──────────────────────────────────────────────────────
+	# ── A. Ground shadow + ambient occlusion ─────────────────────────────────
 	var shadow_pos: Vector2 = vis + f * 0.6 + Vector2(0, 1.6)
-	draw_colored_polygon(_iso_ellipse(shadow_pos, 6.0, 2.4, 12), Color(0, 0, 0, 0.40 * sa))
+	# Soft outer shadow
+	draw_colored_polygon(_iso_ellipse(shadow_pos + Vector2(0, 0.4), 7.6, 3.0, 14), Color(0, 0, 0, 0.18 * sa))
+	# Hard inner shadow (contact)
+	draw_colored_polygon(_iso_ellipse(shadow_pos, 6.0, 2.4, 14), Color(0, 0, 0, 0.50 * sa))
+	# Tight AO at feet
+	draw_colored_polygon(_iso_ellipse(shadow_pos + Vector2(0, -0.2), 3.8, 1.4, 12), Color(0, 0, 0, 0.35 * sa))
 
 	# ── B. Legs (back leg first) ──────────────────────────────────────────────
 	var leg_back_off: Vector2  = -perp * 2.5 + f * (leg_swing if not lunging else -3.0)
@@ -2023,46 +2198,107 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 		vis + Vector2( tw + td, -th + td * 0.5 + b),
 		vis + Vector2(-tw + td, -th + td * 0.5 + b),
 	])
-	draw_colored_polygon(right_face, _shade(torso_front, -0.35, sa))
+	# Expanded outline silhouette behind torso
+	var outline_col: Color = Color(0.02, 0.01, 0.04, 0.95 * sa)
+	var torso_halo := PackedVector2Array([
+		vis + Vector2(-tw - 0.8, -th - 0.8 + b),
+		vis + Vector2( tw + 0.8, -th - 0.8 + b),
+		vis + Vector2( tw + td + 0.8, -th + td * 0.5 + b),
+		vis + Vector2( tw + td + 0.8, td * 0.5 + 0.6 + b),
+		vis + Vector2( tw + td * 0.4 + 0.5, -th * 0.12 + td * 0.5 + 0.8 + b),
+		vis + Vector2(-tw + td * 0.4 - 0.5, -th * 0.12 + td * 0.5 + 0.8 + b),
+	])
+	draw_colored_polygon(torso_halo, outline_col)
+	draw_colored_polygon(right_face, _shade(torso_front, -0.50, sa))
 	draw_colored_polygon(front_face, _shade(torso_front,  0.00, sa))
-	draw_colored_polygon(top_face,   _shade(torso_front,  0.22, sa))
-	# Crisp outline
-	var outline_col: Color = Color(0.04, 0.03, 0.06, 0.85 * sa)
-	draw_polyline(front_face + PackedVector2Array([front_face[0]]), outline_col, 0.6)
+	draw_colored_polygon(top_face,   _shade(torso_front,  0.38, sa))
+	# Specular dot on shoulder/chest top
+	draw_circle(vis + Vector2(-tw * 0.45, -th + 0.6 + b), 0.7,
+		Color(1.0, 0.96, 0.90, 0.50 * sa))
+	# Crisp outline strokes
+	draw_polyline(front_face + PackedVector2Array([front_face[0]]), outline_col, 0.7)
 	draw_polyline(top_face   + PackedVector2Array([top_face[0]]),   outline_col, 0.6)
+	draw_polyline(right_face + PackedVector2Array([right_face[0]]), outline_col, 0.6)
 
 	# Class-specific torso details
 	match cls:
 		"CUTPURSE":
-			# Vest seam down the middle
+			# Leather strap diagonals (crossing)
+			draw_line(vis + Vector2(-tw + 0.2, -th + 1.2 + b),
+				vis + Vector2( tw - 0.5, -th * 0.18 + b),
+				Color(0.16, 0.10, 0.04, 0.92 * sa), 0.9)
+			draw_line(vis + Vector2( tw - 0.2, -th + 1.4 + b),
+				vis + Vector2(-tw + 0.5, -th * 0.18 + b),
+				Color(0.16, 0.10, 0.04, 0.85 * sa), 0.7)
+			# Strap stitching dots
+			for i in range(3):
+				var sx: float = -tw + 0.6 + float(i) * 1.4
+				draw_circle(vis + Vector2(sx, -th + 1.0 + float(i) * 0.6 + b), 0.25,
+					Color(0.58, 0.42, 0.18, 0.85 * sa))
+			# Vest seam down the middle (dark)
 			draw_line(vis + Vector2(td * 0.2, -th + b + 0.5),
-				vis + Vector2(td * 0.3, -th * 0.15 + b), Color(0.18, 0.12, 0.05, 0.85 * sa), 0.6)
-			# Belt
-			draw_line(vis + Vector2(-tw + 0.5, -th * 0.25 + b),
-				vis + Vector2( tw - 0.5, -th * 0.25 + b), Color(0.20, 0.13, 0.05, sa), 1.0)
-			# Buckle
-			draw_circle(vis + Vector2(td * 0.2, -th * 0.25 + b), 0.7, trim_col)
+				vis + Vector2(td * 0.3, -th * 0.15 + b), Color(0.10, 0.06, 0.02, 0.95 * sa), 0.6)
+			# Belt — wide leather band
+			draw_line(vis + Vector2(-tw + 0.3, -th * 0.25 + b),
+				vis + Vector2( tw - 0.3, -th * 0.25 + b), Color(0.14, 0.08, 0.03, sa), 1.4)
+			# Buckle with specular
+			draw_circle(vis + Vector2(td * 0.2, -th * 0.25 + b), 0.9, trim_col)
+			draw_circle(vis + Vector2(td * 0.2 - 0.3, -th * 0.25 - 0.3 + b), 0.35,
+				Color(1.0, 0.95, 0.65, 0.85 * sa))
 		"SHADOWDANCER":
+			# Flowing silk edge highlights along torso sides
+			draw_line(vis + Vector2(-tw - 0.1, -th + 1.0 + b),
+				vis + Vector2(-tw + 0.2, td * 0.4 + b),
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.75 * sa), 0.7)
+			draw_line(vis + Vector2( tw + 0.1, -th + 1.0 + b),
+				vis + Vector2( tw - 0.2, td * 0.4 + b),
+				Color(trim_col.r * 0.7, trim_col.g * 0.5, trim_col.b * 0.95, 0.65 * sa), 0.6)
 			# Purple trim on top edge
 			draw_line(vis + Vector2(-tw, -th + b),
-				vis + Vector2( tw, -th + b), Color(trim_col.r, trim_col.g, trim_col.b, 0.85 * sa), 0.9)
+				vis + Vector2( tw, -th + b), Color(trim_col.r, trim_col.g, trim_col.b, 0.95 * sa), 1.0)
 			# Rune sigil
 			var r_p: Vector2 = vis + Vector2(td * 0.2, -th * 0.45 + b)
-			draw_arc(r_p, 1.6, 0, TAU, 12, Color(trim_col.r, trim_col.g, trim_col.b, 0.55 * sa), 0.6)
-			draw_line(r_p - Vector2(1.2, 0), r_p + Vector2(1.2, 0), Color(trim_col.r, trim_col.g, trim_col.b, 0.55 * sa), 0.5)
+			draw_arc(r_p, 1.8, 0, TAU, 14, Color(trim_col.r, trim_col.g, trim_col.b, 0.75 * sa), 0.7)
+			draw_line(r_p - Vector2(1.3, 0), r_p + Vector2(1.3, 0),
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.70 * sa), 0.6)
+			draw_line(r_p - Vector2(0, 1.3), r_p + Vector2(0, 1.3),
+				Color(trim_col.r, trim_col.g, trim_col.b, 0.70 * sa), 0.6)
+			# Rune inner glow
+			draw_circle(r_p, 0.55, Color(1.0, 0.85, 1.0, 0.55 * sa))
 		"ASSASSIN":
-			# Red shoulder plate (top-left)
+			# Dark plate segments — left pauldron
 			var pauldron := PackedVector2Array([
-				vis + Vector2(-tw - 0.5, -th + b),
-				vis + Vector2(-tw + 2.0, -th + b),
-				vis + Vector2(-tw + 2.4, -th + 1.4 + b),
-				vis + Vector2(-tw - 0.3, -th + 1.6 + b),
+				vis + Vector2(-tw - 0.8, -th - 0.2 + b),
+				vis + Vector2(-tw + 2.2, -th - 0.2 + b),
+				vis + Vector2(-tw + 2.5, -th + 1.8 + b),
+				vis + Vector2(-tw - 0.5, -th + 2.0 + b),
 			])
-			draw_colored_polygon(pauldron, _shade(trim_col, 0.10, sa))
-			draw_polyline(pauldron + PackedVector2Array([pauldron[0]]), outline_col, 0.5)
-			# Crossbelt
+			draw_colored_polygon(pauldron, Color(0.12, 0.04, 0.04, sa))
+			# Pauldron lit edge
+			draw_line(vis + Vector2(-tw - 0.5, -th + b),
+				vis + Vector2(-tw + 2.2, -th + b),
+				_shade(trim_col, 0.10, sa), 0.6)
+			draw_polyline(pauldron + PackedVector2Array([pauldron[0]]), outline_col, 0.55)
+			# Right pauldron (smaller, in shadow)
+			var pauld_r := PackedVector2Array([
+				vis + Vector2( tw - 1.8, -th - 0.1 + b),
+				vis + Vector2( tw + 0.6, -th - 0.1 + b),
+				vis + Vector2( tw + 0.9, -th + 1.6 + b),
+				vis + Vector2( tw - 1.5, -th + 1.8 + b),
+			])
+			draw_colored_polygon(pauld_r, Color(0.08, 0.03, 0.04, sa))
+			draw_polyline(pauld_r + PackedVector2Array([pauld_r[0]]), outline_col, 0.5)
+			# Chest plate segment lines (horizontal armor bands)
+			for i in range(2):
+				var py: float = -th + 3.2 + float(i) * 1.8 + b
+				draw_line(vis + Vector2(-tw + 0.5, py), vis + Vector2(tw - 0.5, py),
+					Color(0.04, 0.02, 0.03, 0.9 * sa), 0.4)
+			# Red crossbelt with specular
 			draw_line(vis + Vector2(-tw + 0.3, -th + 2.0 + b),
-				vis + Vector2( tw - 0.3, -th * 0.1 + b), Color(0.20, 0.04, 0.06, 0.80 * sa), 0.7)
+				vis + Vector2( tw - 0.3, -th * 0.1 + b),
+				Color(trim_col.r * 0.7, trim_col.g * 0.1, trim_col.b * 0.1, 0.95 * sa), 0.9)
+			draw_circle(vis + Vector2(td * 0.2, -th * 0.6 + b), 0.55,
+				Color(trim_col.r, trim_col.g * 0.4, trim_col.b * 0.4, 0.85 * sa))
 
 	# ── E. Cape (SHADOWDANCER / ASSASSIN) ─────────────────────────────────────
 	if cls == "SHADOWDANCER" or cls == "ASSASSIN":
@@ -2209,167 +2445,20 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 			draw_circle(eye_lp, eye_r_size * 1.6, Color(eye_col.r, eye_col.g, eye_col.b, 0.25 * sa))
 			draw_circle(eye_rp, eye_r_size * 1.6, Color(eye_col.r, eye_col.g, eye_col.b, 0.25 * sa))
 
-	# Class colors
-	var cloak_col: Color
-	var accent_col: Color
+	# ── Helmet/hood top specular highlight ───────────────────────────────────
 	match cls:
-		"CUTPURSE":
-			cloak_col  = Color(0.28, 0.22, 0.09) if not is_sneaking else Color(0.12, 0.09, 0.04)
-			accent_col = Color(0.88, 0.68, 0.18)
-			boot_col   = Color(0.35, 0.22, 0.10)
-		"SHADOWDANCER":
-			cloak_col  = Color(0.12, 0.08, 0.22) if not is_sneaking else Color(0.05, 0.03, 0.12)
-			accent_col = Color(0.55, 0.30, 0.95)
-			boot_col   = Color(0.15, 0.10, 0.25)
 		"ASSASSIN":
-			cloak_col  = Color(0.20, 0.05, 0.05) if not is_sneaking else Color(0.08, 0.02, 0.02)
-			accent_col = Color(0.88, 0.18, 0.18)
-			boot_col   = Color(0.14, 0.05, 0.05)
-		"SELLSWORD":
-			cloak_col  = Color(0.26, 0.20, 0.10) if not is_sneaking else Color(0.14, 0.10, 0.05)
-			accent_col = Color(0.92, 0.56, 0.18)
-			boot_col   = Color(0.32, 0.20, 0.10)
-		_:
-			cloak_col  = Color(0.20, 0.16, 0.38) if not is_sneaking else Color(0.10, 0.08, 0.20)
-			accent_col = Color(0.40, 0.28, 0.72)
-			boot_col   = Color(0.18, 0.14, 0.28)
-
-	var cloak_sway: float = sin(t * 5.0) * 0.4
-
-	# ── Ground shadow ─────────────────────────────────────────────────────────
-	draw_circle(vis + Vector2(0.4, 1.8), 5.2, Color(0.0, 0.0, 0.0, 0.18 * sa))
-
-	# ── Cape trailing behind ──────────────────────────────────────────────────
-	var cape_l := vis - f * 1.0 + perp * (4.8 + cloak_sway)
-	var cape_r := vis - f * 1.0 - perp * (4.8 - cloak_sway)
-	var cape_tip := vis - f * 11.0 + Vector2(0, bob * 0.3)
-	var cape_dark := Color(cloak_col.r * 0.50, cloak_col.g * 0.50, cloak_col.b * 0.55, 0.88 * sa)
-	draw_colored_polygon(PackedVector2Array([cape_l, cape_r, cape_tip]), cape_dark)
-	# Cape highlight edge
-	draw_line(cape_l, cape_tip, Color(cloak_col.r * 1.5, cloak_col.g * 1.5, cloak_col.b * 1.8, 0.28 * sa), 0.7)
-	# Inner cape sheen
-	var cape_inner_tip := vis - f * 7.0 + Vector2(0, bob * 0.2)
-	draw_colored_polygon(PackedVector2Array([
-		vis - f * 1.5 + perp * 2.5,
-		vis - f * 1.5 - perp * 2.5,
-		cape_inner_tip]),
-		Color(cloak_col.r * 0.75, cloak_col.g * 0.75, cloak_col.b * 0.80, 0.45 * sa))
-
-	# ── Legs / boots ──────────────────────────────────────────────────────────
-	var leg_l_pos := vis + perp * 2.6 + f * (-3.2 + leg_swing * 0.35) + Vector2(0, bob)
-	var leg_r_pos := vis - perp * 2.6 + f * (-3.2 - leg_swing * 0.35) + Vector2(0, -bob)
-	# Boot shaft
-	draw_circle(leg_l_pos - f * 0.5, 1.9, boot_col.darkened(0.28))
-	draw_circle(leg_r_pos - f * 0.5, 1.9, boot_col.darkened(0.28))
-	# Boot toe
-	draw_circle(leg_l_pos + f * 1.4, 1.5, boot_col)
-	draw_circle(leg_r_pos + f * 1.4, 1.5, boot_col)
-	# Boot highlight
-	draw_circle(leg_l_pos + f * 1.4 - perp * 0.6, 0.55, Color(boot_col.r * 1.55, boot_col.g * 1.55, boot_col.b * 1.4, 0.55 * sa))
-	draw_circle(leg_r_pos + f * 1.4 + perp * 0.6, 0.55, Color(boot_col.r * 1.55, boot_col.g * 1.55, boot_col.b * 1.4, 0.55 * sa))
-
-	# ── Body / torso ──────────────────────────────────────────────────────────
-	var body_pos := vis + Vector2(0, bob * 0.18)
-	draw_circle(body_pos, 4.8, cloak_col)
-	# Torso highlight (specular)
-	draw_circle(body_pos - f * 1.2 + perp * 1.0, 1.6,
-		Color(cloak_col.r * 1.7, cloak_col.g * 1.7, cloak_col.b * 1.9, 0.28 * sa))
-	# Torso rim (outline-ish effect)
-	draw_arc(body_pos, 4.8, 0, TAU, 16,
-		Color(cloak_col.r * 0.5, cloak_col.g * 0.5, cloak_col.b * 0.6, 0.55 * sa), 0.8)
-
-	# ── Arms ──────────────────────────────────────────────────────────────────
-	var arm_l := vis + perp * 5.4 + f * arm_swing * 0.25 + Vector2(0, bob * 0.15)
-	var arm_r := vis - perp * 5.4 - f * arm_swing * 0.25 + Vector2(0, -bob * 0.15)
-	var skin_d := Color(skin_col.r * 0.80, skin_col.g * 0.80, skin_col.b * 0.78, sa)
-	draw_circle(arm_l, 1.6, skin_d)
-	draw_circle(arm_r, 1.6, skin_d)
-
-	# ── Class-specific torso details ──────────────────────────────────────────
-	match cls:
-		"CUTPURSE":
-			# Gold coin pouch on belt
-			draw_circle(body_pos - f * 1.0 + perp * 3.5, 1.8, Color(0.28, 0.18, 0.08))
-			draw_circle(body_pos - f * 1.0 + perp * 3.5, 1.2, Color(accent_col.r * 0.85, accent_col.g * 0.85, accent_col.b * 0.5))
-			# Belt buckle
-			var bb := body_pos - f * 0.5
-			draw_line(bb + perp * -2.8, bb + perp * 2.8, Color(accent_col.r * 0.65, accent_col.g * 0.50, accent_col.b * 0.15, 0.65), 1.0)
-			draw_circle(bb, 0.9, Color(accent_col.r * 0.85, accent_col.g * 0.65, accent_col.b * 0.18))
+			# Specular dot on top of visor
+			draw_circle(head_pos + Vector2(0.6, -head_r * 0.6), 0.6,
+				Color(1.0, 0.92, 0.85, 0.80 * sa))
 		"SHADOWDANCER":
-			# Rune sigil on chest
-			var rune_p := body_pos + f * 1.2
-			draw_arc(rune_p, 2.0, 0, TAU, 14, Color(accent_col.r, accent_col.g, accent_col.b, 0.45 * sa), 0.8)
-			draw_line(rune_p - perp * 1.5, rune_p + perp * 1.5, Color(accent_col.r, accent_col.g, accent_col.b, 0.35 * sa), 0.7)
-			draw_line(rune_p - f * 1.5, rune_p + f * 1.5, Color(accent_col.r, accent_col.g, accent_col.b, 0.35 * sa), 0.7)
-		"ASSASSIN":
-			# Crossbelt leather straps
-			draw_line(body_pos - perp * 4.0 + f * 2.0, body_pos + perp * 4.0 - f * 2.0,
-				Color(accent_col.r * 0.55, accent_col.g * 0.18, accent_col.b * 0.18, 0.65 * sa), 1.0)
-			draw_line(body_pos + perp * 4.0 + f * 2.0, body_pos - perp * 4.0 - f * 2.0,
-				Color(accent_col.r * 0.55, accent_col.g * 0.18, accent_col.b * 0.18, 0.65 * sa), 1.0)
-		"SELLSWORD":
-			# Pauldrons (shoulder pads)
-			var paul_c := Color(0.58, 0.52, 0.48)
-			draw_circle(body_pos + perp * 4.5, 2.4, paul_c.darkened(0.2))
-			draw_circle(body_pos - perp * 4.5, 2.4, paul_c.darkened(0.2))
-			draw_circle(body_pos + perp * 4.5 + f * 0.3, 1.2, paul_c.lightened(0.12))
-			draw_circle(body_pos - perp * 4.5 + f * 0.3, 1.2, paul_c.lightened(0.12))
-
-	# ── Hood / head ───────────────────────────────────────────────────────────
-	head_pos = vis + f * 3.6 + Vector2(0, bob * 0.45)
-	var hood_dark := cloak_col.darkened(0.2)
-	draw_circle(head_pos, 3.2, hood_dark)
-	# Hood fold lines
-	draw_arc(head_pos - f * 1.0, 2.8, f.angle() + PI - 1.0, f.angle() + PI + 1.0, 8,
-		Color(cloak_col.r * 0.65, cloak_col.g * 0.65, cloak_col.b * 0.72, 0.40 * sa), 0.8)
-	# Hood opening rim — accent color
-	draw_arc(head_pos, 3.2, f.angle() - 0.95, f.angle() + 0.95, 10,
-		Color(accent_col.r, accent_col.g, accent_col.b, 0.60 * sa), 1.1)
-	# Face (skin) visible in hood opening
-	var face_pos := head_pos + f * 1.5
-	draw_circle(face_pos, 1.6, skin_col)
-	# Eyes
-	var eye_l := face_pos + perp * 0.55 - f * 0.2
-	var eye_r := face_pos - perp * 0.55 - f * 0.2
-	draw_circle(eye_l, 0.45, Color(0.05, 0.04, 0.08))
-	draw_circle(eye_r, 0.45, Color(0.05, 0.04, 0.08))
-
-	# ── Race-specific details ─────────────────────────────────────────────────
-	match race:
-		"TIEFLING":
-			# Demon horns curving back
-			draw_line(head_pos + perp * 2.8 - f * 0.5,
-				head_pos + perp * 3.5 - f * 3.0, Color(0.18, 0.06, 0.30), 1.6)
-			draw_line(head_pos - perp * 2.8 - f * 0.5,
-				head_pos - perp * 3.5 - f * 3.0, Color(0.18, 0.06, 0.30), 1.6)
-			# Hellfire eye glow
-			draw_circle(eye_l, 0.5, Color(0.95, 0.25, 0.05, 0.85))
-			draw_circle(eye_r, 0.5, Color(0.95, 0.25, 0.05, 0.85))
-		"WOOD_ELF":
-			# Pointed ears extending to the sides
-			draw_line(head_pos + perp * 3.0, head_pos + perp * 5.2 + f * 1.2,
-				Color(skin_col.r * 0.88, skin_col.g * 0.88, skin_col.b * 0.80), 1.5)
-			draw_line(head_pos - perp * 3.0, head_pos - perp * 5.2 + f * 1.2,
-				Color(skin_col.r * 0.88, skin_col.g * 0.88, skin_col.b * 0.80), 1.5)
-			# Leaf-green eye glow
-			draw_circle(eye_l, 0.5, Color(0.28, 0.85, 0.38, 0.90))
-			draw_circle(eye_r, 0.5, Color(0.28, 0.85, 0.38, 0.90))
-		"HALFLING":
-			# Slightly oversized head and rounder hood
-			draw_circle(head_pos, 3.6, hood_dark)
-			draw_circle(face_pos - f * 0.2, 1.9, skin_col)
-			# Rosy cheeks
-			draw_circle(face_pos + perp * 1.2 - f * 0.3, 0.7, Color(0.88, 0.48, 0.38, 0.45))
-			draw_circle(face_pos - perp * 1.2 - f * 0.3, 0.7, Color(0.88, 0.48, 0.38, 0.45))
-		"DWARF":
-			# Broader body and proud beard
-			draw_circle(body_pos + perp * 5.2, 1.4, Color(0.52, 0.42, 0.28))  # extra width
-			draw_circle(body_pos - perp * 5.2, 1.4, Color(0.52, 0.42, 0.28))
-			# Braided beard
-			var beard_col := Color(0.72, 0.55, 0.28, 0.80)
-			draw_circle(face_pos - f * 0.8 + Vector2(0, 2.0), 1.8, beard_col)
-			draw_circle(face_pos - f * 0.4 + Vector2(0, 3.5), 1.2, beard_col.darkened(0.1))
-			draw_circle(face_pos + Vector2(0, 4.8), 0.8, beard_col.darkened(0.2))
+			# Soft purple specular on cowl crown
+			draw_circle(head_pos + Vector2(-0.4, -head_r - 0.6), 0.7,
+				Color(trim_col.r * 1.3, trim_col.g * 1.2, trim_col.b * 1.2, 0.55 * sa))
+		"CUTPURSE":
+			# Warm hood highlight
+			draw_circle(head_pos + Vector2(-0.3, -head_r * 0.85), 0.7,
+				Color(0.95, 0.78, 0.40, 0.55 * sa))
 
 func _draw_weapon_svg(vis: Vector2, f: Vector2, perp: Vector2):
 	var t: float = _anim_t
@@ -2561,38 +2650,61 @@ func _draw_iso_leg(top: Vector2, col: Color, b: float, sa: float) -> void:
 	var hip_r: Vector2  = top + Vector2( 1.6, -2.0 + b)
 	var boot_l: Vector2 = top + Vector2(-1.1, 4.0)
 	var boot_r: Vector2 = top + Vector2( 1.1, 4.0)
+	# Expanded outline (slightly larger silhouette behind)
+	var ol_col: Color = Color(0.02, 0.02, 0.04, 0.95 * sa)
+	var ol: PackedVector2Array = PackedVector2Array([
+		hip_l + Vector2(-0.7, -0.5), hip_r + Vector2(0.7, -0.5),
+		boot_r + Vector2(0.6, 0.5),  boot_l + Vector2(-0.6, 0.5),
+	])
+	draw_colored_polygon(ol, ol_col)
+	# Shadow side (right) — fill behind body
+	var shad: PackedVector2Array = PackedVector2Array([hip_l.lerp(hip_r, 0.5), hip_r, boot_r, boot_l.lerp(boot_r, 0.5)])
+	draw_colored_polygon(shad, _shade(col, -0.45, sa))
+	# Light face
 	var poly: PackedVector2Array = PackedVector2Array([hip_l, hip_r, boot_r, boot_l])
 	draw_colored_polygon(poly, _shade(col, 0.00, sa))
+	# Lit face (left strip)
+	draw_colored_polygon(PackedVector2Array([
+		hip_l, hip_l.lerp(hip_r, 0.45), boot_l.lerp(boot_r, 0.45), boot_l,
+	]), _shade(col, 0.18, sa))
 	# Front highlight strip
-	draw_line(hip_l + Vector2(0.3, 0.4), boot_l + Vector2(0.2, -0.2), _shade(col, 0.25, sa * 0.8), 0.4)
-	# Outline
-	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.04, 0.03, 0.06, 0.75 * sa), 0.5)
+	draw_line(hip_l + Vector2(0.3, 0.4), boot_l + Vector2(0.2, -0.2), _shade(col, 0.40, sa * 0.85), 0.5)
 
 func _draw_iso_boot(pos: Vector2, fwd: Vector2, side: Vector2, col: Color, sa: float) -> void:
 	var w: float = 2.0
 	var d: float = 1.6
 	var h: float = 1.6
+	var toe_ext: Vector2 = fwd * 1.8
+	# Expanded dark silhouette (outline halo)
+	var halo: PackedVector2Array = PackedVector2Array([
+		pos + Vector2(-w - 0.6, -h - 0.6),
+		pos + Vector2( w + 0.6, -h - 0.6) + toe_ext,
+		pos + Vector2( w + 0.6,  h + 0.6) + toe_ext * 0.6,
+		pos + Vector2(-w - 0.6,  h + 0.6),
+	])
+	draw_colored_polygon(halo, Color(0.02, 0.02, 0.04, 0.95 * sa))
 	# Front face
 	var front: PackedVector2Array = PackedVector2Array([
 		pos + Vector2(-w, -h), pos + Vector2(w, -h),
 		pos + Vector2(w, h),   pos + Vector2(-w, h),
 	])
-	# Top face (toe extends forward along fwd)
-	var toe_ext: Vector2 = fwd * 1.8
 	var top_p: PackedVector2Array = PackedVector2Array([
 		pos + Vector2(-w, -h), pos + Vector2(w, -h),
 		pos + Vector2(w, -h) + toe_ext, pos + Vector2(-w, -h) + toe_ext,
 	])
-	# Right shadow face
 	var rside: PackedVector2Array = PackedVector2Array([
 		pos + Vector2(w, -h), pos + Vector2(w, -h) + toe_ext,
 		pos + Vector2(w, h)  + toe_ext * 0.6, pos + Vector2(w, h),
 	])
-	draw_colored_polygon(rside, _shade(col, -0.35, sa))
+	draw_colored_polygon(rside, _shade(col, -0.50, sa))
 	draw_colored_polygon(front, _shade(col,  0.00, sa))
-	draw_colored_polygon(top_p, _shade(col,  0.22, sa))
-	draw_polyline(front + PackedVector2Array([front[0]]), Color(0.03, 0.02, 0.05, 0.85 * sa), 0.4)
-	draw_polyline(top_p + PackedVector2Array([top_p[0]]), Color(0.03, 0.02, 0.05, 0.85 * sa), 0.4)
+	draw_colored_polygon(top_p, _shade(col,  0.38, sa))
+	# Specular highlight on toe top
+	var toe_spec: Vector2 = pos + Vector2(-w * 0.2, -h + 0.2) + toe_ext * 0.7
+	draw_circle(toe_spec, 0.55, Color(1.0, 0.96, 0.85, 0.70 * sa))
+	# Outline strokes
+	draw_polyline(front + PackedVector2Array([front[0]]), Color(0.02, 0.01, 0.04, 0.95 * sa), 0.5)
+	draw_polyline(top_p + PackedVector2Array([top_p[0]]), Color(0.02, 0.01, 0.04, 0.95 * sa), 0.5)
 
 func _draw_iso_arm(shoulder: Vector2, hand: Vector2, sleeve: Color, skin: Color, sa: float) -> void:
 	# Skinny arm: shoulder → elbow → hand (slight bend)
@@ -2609,13 +2721,20 @@ func _draw_iso_arm(shoulder: Vector2, hand: Vector2, sleeve: Color, skin: Color,
 		mid + n * 0.9, mid - n * 0.9,
 		hand - n * 0.7, hand + n * 0.7,
 	])
-	draw_colored_polygon(ua, _shade(sleeve, 0.00, sa))
-	draw_colored_polygon(fa, _shade(sleeve, -0.10, sa))
-	draw_polyline(ua + PackedVector2Array([ua[0]]), Color(0.04, 0.03, 0.06, 0.7 * sa), 0.4)
-	draw_polyline(fa + PackedVector2Array([fa[0]]), Color(0.04, 0.03, 0.06, 0.7 * sa), 0.4)
-	# Wrist skin & hand
-	draw_circle(hand, 1.2, _shade(skin, 0.00, sa))
-	draw_circle(hand + Vector2(-0.3, -0.3), 0.5, _shade(skin, 0.25, sa))
+	# Expanded outline halo for arm
+	var ol_a: PackedVector2Array = PackedVector2Array([
+		shoulder + n * 1.7, shoulder - n * 1.7,
+		hand - n * 1.2, hand + n * 1.2,
+	])
+	draw_colored_polygon(ol_a, Color(0.02, 0.02, 0.04, 0.85 * sa))
+	draw_colored_polygon(ua, _shade(sleeve, 0.10, sa))
+	draw_colored_polygon(fa, _shade(sleeve, -0.20, sa))
+	# Lit edge along top of arm
+	draw_line(shoulder + n * 0.9, hand + n * 0.55, _shade(sleeve, 0.45, sa * 0.9), 0.4)
+	# Wrist skin & hand with outline
+	draw_circle(hand, 1.6, Color(0.02, 0.02, 0.04, 0.9 * sa))
+	draw_circle(hand, 1.25, _shade(skin, 0.00, sa))
+	draw_circle(hand + Vector2(-0.3, -0.3), 0.55, _shade(skin, 0.40, sa))
 
 func _draw_cape(vis: Vector2, fwd: Vector2, side: Vector2, cls: String, t: float, b: float, flap: float, sa: float, trim: Color) -> void:
 	var back_dir: Vector2 = -fwd
@@ -2635,22 +2754,39 @@ func _draw_cape(vis: Vector2, fwd: Vector2, side: Vector2, cls: String, t: float
 	var poly: PackedVector2Array = PackedVector2Array([
 		c1, c_inner, c2, c_mid_r, c_low_r, c_tip, c_low_l, c_mid_l,
 	])
+	# Expanded outline halo
+	var ctr: Vector2 = vis + Vector2(0, -2.0 + b)
+	var halo: PackedVector2Array = PackedVector2Array()
+	for p in poly:
+		halo.append(p + (p - ctr).normalized() * 0.7)
+	draw_colored_polygon(halo, Color(0.01, 0.01, 0.03, 0.95 * sa))
 	draw_colored_polygon(poly, cape_col)
-	# Inner sheen
+	# Deep shadow on right fold
 	draw_colored_polygon(PackedVector2Array([
-		c1, c_inner, c2,
-		c2.lerp(c_tip, 0.45), c_tip.lerp(c1, 0.55),
-	]), Color(cape_col.r * 1.7, cape_col.g * 1.7, cape_col.b * 1.9, 0.30 * sa))
+		c_inner, c2, c_mid_r, c_low_r, c_tip,
+	]), Color(cape_col.r * 0.55, cape_col.g * 0.55, cape_col.b * 0.65, cape_col.a))
+	# Inner sheen (lit fold)
+	draw_colored_polygon(PackedVector2Array([
+		c1, c_inner, c_tip.lerp(c1, 0.55),
+	]), Color(cape_col.r * 2.0, cape_col.g * 2.0, cape_col.b * 2.2, 0.35 * sa))
 	# Outline
-	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.02, 0.01, 0.04, 0.8 * sa), 0.5)
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.01, 0.01, 0.03, 0.95 * sa), 0.6)
 	if cls == "ASSASSIN":
-		# Red trim along bottom edge
-		draw_line(c_low_l, c_tip, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.6)
-		draw_line(c_tip,   c_low_r, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.6)
+		# Bold red trim along bottom edge (dark plate flow)
+		draw_line(c_low_l, c_tip, Color(trim.r, trim.g, trim.b, 0.95 * sa), 0.9)
+		draw_line(c_tip,   c_low_r, Color(trim.r, trim.g, trim.b, 0.95 * sa), 0.9)
+		# Inner plate segment lines
+		draw_line(c_mid_l, c_low_l.lerp(c_tip, 0.4), Color(trim.r * 0.6, trim.g * 0.2, trim.b * 0.2, 0.75 * sa), 0.5)
+		draw_line(c_mid_r, c_low_r.lerp(c_tip, 0.4), Color(trim.r * 0.6, trim.g * 0.2, trim.b * 0.2, 0.75 * sa), 0.5)
 	else:
-		# Purple trim
-		draw_line(c1, c_mid_l, Color(trim.r, trim.g, trim.b, 0.60 * sa), 0.5)
-		draw_line(c2, c_mid_r, Color(trim.r, trim.g, trim.b, 0.60 * sa), 0.5)
+		# Flowing silk purple trim
+		draw_line(c1, c_mid_l, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.7)
+		draw_line(c2, c_mid_r, Color(trim.r, trim.g, trim.b, 0.85 * sa), 0.7)
+		draw_line(c_mid_l, c_low_l, Color(trim.r, trim.g, trim.b, 0.70 * sa), 0.6)
+		draw_line(c_mid_r, c_low_r, Color(trim.r, trim.g, trim.b, 0.70 * sa), 0.6)
+		# Silk highlight glint
+		draw_line(c1.lerp(c_mid_l, 0.5), c_mid_l.lerp(c_low_l, 0.5),
+			Color(1.0, 0.95, 1.0, 0.40 * sa), 0.4)
 
 func _draw_blade_tapered(base: Vector2, fwd: Vector2, side: Vector2, length: float, base_w: float, tip_w: float, blade_col: Color, edge_col: Color) -> void:
 	var tip: Vector2 = base + fwd * length
@@ -2660,29 +2796,52 @@ func _draw_blade_tapered(base: Vector2, fwd: Vector2, side: Vector2, length: flo
 		base + side * bw, tip + side * tw_v,
 		tip - side * tw_v, base - side * bw,
 	])
-	# Shadow half (dark)
+	# Expanded dark silhouette (outline halo)
+	var halo: PackedVector2Array = PackedVector2Array([
+		base + side * (bw + 0.5) - fwd * 0.3,
+		tip + side * (tw_v + 0.4) + fwd * 0.4,
+		tip - side * (tw_v + 0.4) + fwd * 0.4,
+		base - side * (bw + 0.5) - fwd * 0.3,
+	])
+	draw_colored_polygon(halo, Color(0.02, 0.02, 0.04, 0.95 * blade_col.a))
+	# Shadow half (dark) — deeper contrast
 	draw_colored_polygon(PackedVector2Array([
 		base + side * bw, tip + side * tw_v, tip, base,
-	]), Color(blade_col.r * 0.55, blade_col.g * 0.55, blade_col.b * 0.65, blade_col.a))
+	]), Color(blade_col.r * 0.40, blade_col.g * 0.40, blade_col.b * 0.50, blade_col.a))
 	# Light half
 	draw_colored_polygon(PackedVector2Array([
 		base, tip, tip - side * tw_v, base - side * bw,
 	]), blade_col)
 	# Bright edge highlight
-	draw_line(base - side * bw * 0.9, tip - side * tw_v * 0.9, edge_col, 0.5)
+	draw_line(base - side * bw * 0.9, tip - side * tw_v * 0.9, edge_col, 0.6)
+	# Specular dot mid-blade
+	var spec: Vector2 = base.lerp(tip, 0.35) - side * bw * 0.4
+	draw_circle(spec, 0.5, Color(1.0, 1.0, 1.0, 0.85 * blade_col.a))
 	# Outline
-	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.04, 0.03, 0.06, 0.85), 0.4)
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.02, 0.01, 0.04, 0.95 * blade_col.a), 0.5)
 
 func _draw_grip(base: Vector2, fwd: Vector2, side: Vector2, length: float, col: Color) -> void:
 	var back: Vector2 = base - fwd * length
 	var w: float = 0.9
+	# Outline halo
+	var halo: PackedVector2Array = PackedVector2Array([
+		base + side * (w + 0.4) + fwd * 0.3, back + side * (w + 0.4) - fwd * 0.3,
+		back - side * (w + 0.4) - fwd * 0.3, base - side * (w + 0.4) + fwd * 0.3,
+	])
+	draw_colored_polygon(halo, Color(0.02, 0.01, 0.03, 0.95))
 	var poly: PackedVector2Array = PackedVector2Array([
 		base + side * w, back + side * w,
 		back - side * w, base - side * w,
 	])
 	draw_colored_polygon(poly, col)
-	draw_line(base + side * w * 0.4, back + side * w * 0.4, col.lightened(0.3), 0.4)
-	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.03, 0.02, 0.05, 0.85), 0.4)
+	# Wrap detail: three thin bands across the grip
+	for i in range(3):
+		var f_t: float = 0.2 + float(i) * 0.3
+		var bp: Vector2 = base.lerp(back, f_t)
+		draw_line(bp + side * w, bp - side * w, col.darkened(0.45), 0.4)
+	# Lit edge
+	draw_line(base + side * w * 0.55, back + side * w * 0.55, col.lightened(0.45), 0.4)
+	draw_polyline(poly + PackedVector2Array([poly[0]]), Color(0.02, 0.01, 0.04, 0.95), 0.5)
 
 func _draw_iso_grip_handle(pos: Vector2, fwd: Vector2, side: Vector2, col: Color) -> void:
 	var poly: PackedVector2Array = PackedVector2Array([
