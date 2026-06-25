@@ -36,9 +36,23 @@ func interact(player: Node):
 		get_tree().root.add_child(wp)
 
 	# Show popup
-	var wname: String = GameManager.WEAPONS.get(weapon_id, {}).get("name", weapon_id)
+	var wdata_pop: Dictionary = GameManager.WEAPONS.get(weapon_id, {})
+	var wname: String = wdata_pop.get("name", weapon_id)
 	var popup := _dice_scene.instantiate()
-	popup.setup("EQUIPPED: " + wname, Color(0.55, 0.85, 0.55))
+	if GameManager.is_legendary(weapon_id):
+		var meta: Node = get_node_or_null("/root/MetaProgress")
+		var first_find := false
+		if meta != null and meta.has_method("discover_legendary"):
+			first_find = meta.discover_legendary(weapon_id)
+		var col: Color = wdata_pop.get("color", Color(0.95, 0.80, 0.20))
+		var banner := ("✦ LEGENDARY FOUND ✦  " if first_find else "✦ ") + wname
+		popup.setup(banner, col)
+		if player.has_method("_popup"):
+			player._popup(wdata_pop.get("flavor", ""), Color(0.80, 0.78, 0.70))
+		if player.has_method("get_tree"):
+			GameManager.shake(3.0, 0.25)
+	else:
+		popup.setup("EQUIPPED: " + wname, Color(0.55, 0.85, 0.55))
 	popup.global_position = player.global_position + Vector2(0, -10)
 	get_tree().root.add_child(popup)
 
@@ -49,6 +63,17 @@ func _draw():
 	var bv   := Vector2(0, bob)
 	var wdata: Dictionary = GameManager.WEAPONS.get(weapon_id, {})
 	var wcol: Color = wdata.get("color", Color(0.70, 0.70, 0.70))
+
+	# Legendary aura: pulsing halo + slow rotating star ring
+	var legendary: bool = GameManager.is_legendary(weapon_id)
+	if legendary:
+		var pulse := (sin(_bob_t * 2.2) + 1.0) * 0.5
+		draw_circle(bv, 11.0 + pulse * 2.0, Color(wcol.r, wcol.g, wcol.b, 0.10 + pulse * 0.06))
+		draw_arc(bv, 9.0, 0, TAU, 24, Color(wcol.r, wcol.g, wcol.b, 0.45), 1.2)
+		for si in range(8):
+			var a := _bob_t * 0.6 + si * (TAU / 8.0)
+			var rp := bv + Vector2(cos(a), sin(a)) * (9.0 + pulse * 1.5)
+			draw_circle(rp, 0.9, Color(wcol.r, wcol.g, wcol.b, 0.55))
 
 	# Glow base
 	draw_arc(bv, 7.5, 0, TAU, 20, Color(wcol.r, wcol.g, wcol.b, 0.30), 1.0)
@@ -99,6 +124,15 @@ func _draw():
 			# Horizontal bar + vertical notch
 			draw_line(bv + Vector2(-5.0, 0), bv + Vector2(5.0, 0), wcol, 2.0)
 			draw_line(bv + Vector2(0, -4.0), bv + Vector2(0, 1.5), wcol, 1.2)
+		"WHISPER", "MOURNFALL", "NIGHTWEAVE", "AVARICE", "HUSHWARD", "GRAVEWARDEN", "TEMPEST", "DOOMHOWL":
+			# Legendary: a four-point star
+			var pts := PackedVector2Array([
+				bv + Vector2(0, -5.5), bv + Vector2(1.5, -1.5), bv + Vector2(5.5, 0),
+				bv + Vector2(1.5, 1.5), bv + Vector2(0, 5.5), bv + Vector2(-1.5, 1.5),
+				bv + Vector2(-5.5, 0), bv + Vector2(-1.5, -1.5),
+			])
+			draw_colored_polygon(pts, wcol)
+			draw_circle(bv, 1.4, Color(1.0, 1.0, 0.92, 0.9))
 		_:
 			# Fallback: thin triangle
 			var ft1 := bv + Vector2(0, -4.5)

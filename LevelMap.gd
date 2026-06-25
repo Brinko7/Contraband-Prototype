@@ -7,6 +7,13 @@ const FLOOR     := 0
 const MAP_COLS  := 48
 const MAP_ROWS  := 36
 
+const _Floorplans := preload("res://Floorplans.gd")
+
+# Active building layout for this floor (chosen deterministically from the run
+# seed + floor). Index 0 is CLASSIC, which keeps all bespoke code paths.
+var _plan_idx: int = 0
+var _plan: Dictionary = {}
+
 # ── Zone colour palettes ───────────────────────────────────────────────────────
 var C_FLOOR_VAULT_A  := Color(0.095, 0.085, 0.130)
 var C_FLOOR_VAULT_B  := Color(0.115, 0.100, 0.160)
@@ -22,46 +29,49 @@ var C_WALL_MID_E     := Color(0.40, 0.32, 0.24)
 var C_WALL_ENTRY     := Color(0.30, 0.23, 0.17)
 var C_WALL_ENTRY_E   := Color(0.44, 0.35, 0.25)
 
-# ── Torch sconce positions (world-pixel centres) ───────────────────────────────
-const TORCHES: Array[Vector2] = [
-	# Vault — three across north face
-	Vector2(240,  24),
-	Vector2(384,  24),
-	Vector2(528,  24),
-	# Captain's Office — two: north wall, south-east corner
-	Vector2( 80, 140),
-	Vector2(216, 270),
-	# Antechamber — one center north
-	Vector2(408, 140),
-	# Armory — two: north, east wall
-	Vector2(636, 140),
-	Vector2(700, 252),
-	# Barracks — north-west and south-center
-	Vector2( 72, 316),
-	Vector2(216, 442),
-	# Storeroom — north-east
-	Vector2(660, 316),
-	# Entry Foyer — flanking center
-	Vector2(300, 494),
-	Vector2(468, 494),
-]
+# ── SNES-style stone palettes (built per floor in _build_palettes) ─────────────
+# FLOOR_STONE[zone] = {d,m,l,grout,moss,accent}  — warm, readable, walkable
+# WALL_STONE[zone]  = {face,faced,cap,caphi,mortar,moss} — darker block w/ lit cap
+var FLOOR_STONE: Dictionary = {}
+var WALL_STONE:  Dictionary = {}
 
-const ROOM_TILE_RECTS: Array[Rect2i] = [
-	Rect2i(11, 30, 26,  5),   # Entry Foyer
-	Rect2i( 1, 19, 19, 10),   # Barracks
-	Rect2i(27, 19, 19, 10),   # Storeroom
-	Rect2i( 1,  8, 16, 10),   # Captain's Office
-	Rect2i(19,  8, 13, 10),   # Antechamber
-	Rect2i( 6,  1, 36,  6),   # The Vault
-	Rect2i(35,  8, 11, 10),   # Armory
-]
+# Torch sconce positions + room rects are populated from the active floorplan
+# in _select_plan() (called first thing in _ready). Untyped so plan arrays
+# assign cleanly. The minimap reads ROOM_TILE_RECTS; fog uses visited_rooms.
+var TORCHES: Array = []
+var ROOM_TILE_RECTS: Array = []
 
 var map: Array = []
 
-var visited_rooms: Array[bool] = [true, false, false, false, false, false, false]
+var visited_rooms: Array = []
 
 var _t: float = 0.0
 var _tileset: Texture2D = null
+
+# ── Tilesheet (SNES stone) ────────────────────────────────────────────────────
+static var _tileset_cache := {}
+# Floor variant piece rects within the 128×80 themed sheet.
+const _TR_PLAIN_A := Rect2(0,  0, 16, 16)
+const _TR_PLAIN_B := Rect2(16, 0, 16, 16)
+const _TR_CRACKED := Rect2(32, 0, 16, 16)
+const _TR_MOSSY   := Rect2(48, 0, 16, 16)
+const _TR_INLAY   := Rect2(64, 0, 16, 16)
+const _TR_GLINT   := Rect2(80, 0, 16, 16)
+const _TR_WALL_CAP   := Rect2(96,  0, 16, 16)
+const _TR_CORNER_CAP := Rect2(112, 0, 16, 16)
+const _TR_BASE_SHADOW := Rect2(0, 16, 16, 16)
+const _TR_WALL_FACE   := Rect2(0, 32, 16, 48)
+
+func _tileset_tex() -> Texture2D:
+	var fl: int = GameManager.current_floor
+	var path: String = "res://sprites/tiles_obsidian.png"
+	if fl == 1:   path = "res://sprites/tiles_sandstone.png"
+	elif fl == 2: path = "res://sprites/tiles_slate.png"
+	if _tileset_cache.has(path):
+		return _tileset_cache[path]
+	var tex: Texture2D = load(path) if ResourceLoader.exists(path) else null
+	_tileset_cache[path] = tex
+	return tex
 
 var _tex_booth:  Texture2D = null
 var _tex_crate:  Texture2D = null
@@ -75,15 +85,35 @@ var _tex_altar:  Texture2D = null
 
 func _ready():
 	add_to_group("levelmap")
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	_tileset    = null
 	_tex_booth  = null; _tex_crate = null; _tex_board = null
 	_tex_bed    = null; _tex_table = null; _tex_bench = null
 	_tex_rack   = null; _tex_plinth = null; _tex_altar = null
+	_select_plan()
 	_apply_floor_theme()
 	_build_map()
 	_randomize_cover()
 	_build_collision()
 	_build_furniture_collision()
+
+# Choose the active building and publish its room/torch data. Both LevelMap and
+# World call Floorplans.pick() with the same seed+floor, so they always agree.
+func _select_plan():
+	_plan_idx = _Floorplans.pick(GameManager.run_seed, GameManager.current_floor)
+	_plan = _Floorplans.get_plan(_plan_idx)
+	ROOM_TILE_RECTS = []
+	TORCHES = []
+	visited_rooms = []
+	for room in _plan.get("rooms", []):
+		ROOM_TILE_RECTS.append(room["rect"])
+		visited_rooms.append(false)
+	for t in _plan.get("torches", []):
+		TORCHES.append(t)
+	# Entry room starts revealed (player begins there).
+	var entry_idx: int = _plan.get("entry_idx", 0)
+	if entry_idx >= 0 and entry_idx < visited_rooms.size():
+		visited_rooms[entry_idx] = true
 
 func _process(delta):
 	_t += delta
@@ -98,6 +128,12 @@ func _build_map():
 		for c in range(MAP_COLS):
 			row.append(WALL)
 		map.append(row)
+
+	# New floorplans carve straight from their plan data.
+	if _plan_idx != 0:
+		for crect in _plan.get("carves", []):
+			_carve(crect)
+		return
 
 	# ── Vault (top, grand & wide) ────────────────────────────────────────────
 	_carve(Rect2i( 6,  1, 36,  6))   # The Vault: cols 6-41, rows 1-6
@@ -137,6 +173,13 @@ func _carve(rect: Rect2i):
 func _randomize_cover():
 	var rng := RandomNumberGenerator.new()
 	rng.seed = GameManager.run_seed + GameManager.current_floor * 31337
+
+	# New floorplans use their own pillar candidates (kept clear of corridors).
+	if _plan_idx != 0:
+		for p: Vector2i in _plan.get("cover", []):
+			if rng.randi_range(0, 2) != 0:
+				_place_pillar(p.x, p.y)
+		return
 
 	# Vault — decorative corner alcoves, clear of vault corridors (cols 8-10, 25-27)
 	var vpillars := [Vector2i(14, 2), Vector2i(18, 3), Vector2i(32, 2), Vector2i(36, 3)]
@@ -219,6 +262,13 @@ func _update_fog():
 		visited_rooms[idx] = true
 
 func _tile_to_room(tc: Vector2i) -> int:
+	if _plan_idx != 0:
+		for i in range(ROOM_TILE_RECTS.size()):
+			var rr: Rect2i = ROOM_TILE_RECTS[i]
+			if tc.x >= rr.position.x and tc.x < rr.position.x + rr.size.x \
+			and tc.y >= rr.position.y and tc.y < rr.position.y + rr.size.y:
+				return i
+		return -1
 	if tc.y >= 30 and tc.y <= 34 and tc.x >= 11 and tc.x <= 36: return 0  # Entry Foyer
 	if tc.y >= 19 and tc.y <= 28 and tc.x >=  1 and tc.x <= 19: return 1  # Barracks
 	if tc.y >= 19 and tc.y <= 28 and tc.x >= 27 and tc.x <= 45: return 2  # Storeroom
@@ -257,6 +307,57 @@ func _apply_floor_theme():
 			C_WALL_VAULT     = Color(0.38, 0.42, 0.72); C_WALL_VAULT_E   = Color(0.52, 0.58, 0.90)
 			C_WALL_MID       = Color(0.40, 0.42, 0.52); C_WALL_MID_E     = Color(0.56, 0.58, 0.72)
 			C_WALL_ENTRY     = Color(0.42, 0.42, 0.50); C_WALL_ENTRY_E   = Color(0.58, 0.58, 0.68)
+	_build_palettes(GameManager.current_floor)
+
+# Build the SNES stone palettes for floor + walls, themed per floor depth.
+# Three base moods: warm sandstone cellar → cool slate dungeon → obsidian vault.
+# Zones (0 vault / 1 mid / 2 entry) get subtle hue shifts within the mood.
+func _build_palettes(floor_id: int) -> void:
+	# Base mood stones: dark / mid / light / grout, plus moss + accent.
+	var fd: Color; var fm: Color; var fl: Color; var fg: Color; var moss: Color; var acc: Color
+	# Wall: face / face-dark / cap / cap-hilite / mortar / wall-moss
+	var wf: Color; var wc: Color; var wch: Color; var wm: Color
+	match floor_id:
+		1:  # The Cellars — warm torchlit sandstone
+			fd = Color(0.205, 0.150, 0.098); fm = Color(0.315, 0.240, 0.155)
+			fl = Color(0.430, 0.335, 0.220); fg = Color(0.098, 0.068, 0.040)
+			moss = Color(0.200, 0.255, 0.130); acc = Color(0.660, 0.520, 0.260)
+			wf = Color(0.250, 0.205, 0.165); wc = Color(0.470, 0.395, 0.300)
+			wch = Color(0.610, 0.520, 0.405); wm = Color(0.088, 0.062, 0.038)
+		2:  # Slate Dungeon — cool damp blue-grey
+			fd = Color(0.140, 0.165, 0.205); fm = Color(0.225, 0.255, 0.305)
+			fl = Color(0.330, 0.368, 0.430); fg = Color(0.070, 0.082, 0.105)
+			moss = Color(0.150, 0.235, 0.180); acc = Color(0.330, 0.430, 0.530)
+			wf = Color(0.195, 0.220, 0.270); wc = Color(0.360, 0.405, 0.485)
+			wch = Color(0.490, 0.540, 0.640); wm = Color(0.060, 0.072, 0.095)
+		_:  # Obsidian Vault — deep arcane violet
+			fd = Color(0.130, 0.108, 0.190); fm = Color(0.200, 0.168, 0.285)
+			fl = Color(0.295, 0.252, 0.400); fg = Color(0.062, 0.050, 0.105)
+			moss = Color(0.180, 0.140, 0.290); acc = Color(0.470, 0.360, 0.730)
+			wf = Color(0.180, 0.158, 0.250); wc = Color(0.330, 0.298, 0.450)
+			wch = Color(0.470, 0.430, 0.620); wm = Color(0.052, 0.044, 0.090)
+	# Per-zone hue nudges: vault richer/cooler, entry warmer.
+	var zshift := {
+		0: Vector3( 0.010,  0.000,  0.030),   # vault — cooler/regal
+		1: Vector3( 0.000,  0.012,  0.000),   # mid   — faint green
+		2: Vector3( 0.028,  0.010, -0.010),   # entry — warmer
+	}
+	FLOOR_STONE = {}
+	WALL_STONE = {}
+	for z in [0, 1, 2]:
+		var s: Vector3 = zshift[z]
+		FLOOR_STONE[z] = {
+			"d": _nud(fd, s), "m": _nud(fm, s), "l": _nud(fl, s),
+			"grout": fg, "moss": moss, "accent": acc,
+		}
+		WALL_STONE[z] = {
+			"face": _nud(wf, s), "faced": _nud(wf, s).darkened(0.34),
+			"cap": _nud(wc, s), "caphi": _nud(wch, s),
+			"mortar": wm, "moss": moss.darkened(0.2),
+		}
+
+func _nud(c: Color, s: Vector3) -> Color:
+	return Color(clamp(c.r + s.x, 0.0, 1.0), clamp(c.g + s.y, 0.0, 1.0), clamp(c.b + s.z, 0.0, 1.0))
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 func _draw():
@@ -345,189 +446,231 @@ func _iso_ellipse_pts(center: Vector2, rx: float, ry: float, segments: int = 16)
 		pts.append(Vector2(center.x + cos(a) * rx, center.y + sin(a) * ry))
 	return pts
 
-# ── Floor tile (Hades-style deep charcoal stone) ──────────────────────────────
+# ── Floor tile (SNES flagstone — 2×2 ramped stones in a grout bed) ────────────
 func _draw_floor_tile(x: float, y: float, c: int, r: int, zone: int, floor_id: int):
-	var tile_hash: int = (r * 47 + c * 31) % 100
-	# Deep charcoal base, with subtle zone tint mixed in
-	var zone_tint: Color
-	match zone:
-		0: zone_tint = Color(0.04, 0.02, 0.06)   # vault — faintly purple
-		1: zone_tint = Color(0.02, 0.03, 0.02)   # mid — faintly green
-		_: zone_tint = Color(0.04, 0.03, 0.02)   # entry — faintly warm
-	var base: Color = Color(0.10 + zone_tint.r, 0.09 + zone_tint.g, 0.11 + zone_tint.b)
-	# Per-tile deterministic shade variation
-	var vshade: float = float(tile_hash % 11) * 0.006 - 0.02
-	base = Color(
-		clamp(base.r + vshade, 0.04, 0.30),
-		clamp(base.g + vshade, 0.04, 0.30),
-		clamp(base.b + vshade + float(tile_hash % 5) * 0.002, 0.04, 0.32)
-	)
+	# Sprite path — blit a themed floor variant; deterministic per cell.
+	var tex: Texture2D = _tileset_tex()
+	if tex != null:
+		var hh: int = ((c * 374761393) ^ (r * 668265263)) & 0x7fffffff
+		var v: int = hh % 100
+		var src: Rect2
+		if v < 6:
+			src = _TR_MOSSY
+		elif v < 10:
+			src = _TR_CRACKED
+		elif v == 11 and floor_id >= 3:
+			src = _TR_INLAY
+		elif floor_id == 1 and v == 14:
+			src = _TR_GLINT
+		else:
+			src = _TR_PLAIN_A if ((hh >> 3) & 1) == 0 else _TR_PLAIN_B
+		draw_texture_rect_region(tex, Rect2(x, y, TILE_SIZE, TILE_SIZE), src)
+		return
 
-	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), base)
+	var p: Dictionary = FLOOR_STONE.get(zone, FLOOR_STONE.get(1, {}))
+	if p.is_empty():
+		draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), Color(0.2, 0.16, 0.12))
+		return
+	var h: int = ((c * 374761393) ^ (r * 668265263)) & 0x7fffffff
+	var d: Color = p["d"]; var m: Color = p["m"]; var l: Color = p["l"]
+	var grout: Color = p["grout"]
 
-	# Tile seam lines — 1px darker on right + bottom edge (cuts deep)
-	var seam: Color = Color(0, 0, 0, 0.55)
-	draw_rect(Rect2(x, y + TILE_SIZE - 1, TILE_SIZE, 1), seam)
-	draw_rect(Rect2(x + TILE_SIZE - 1, y, 1, TILE_SIZE), seam)
-	# Top-left faint highlight (catch-light edge)
-	draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1, 1, 1, 0.035))
-	draw_rect(Rect2(x, y, 1, TILE_SIZE), Color(1, 1, 1, 0.025))
+	# Grout bed
+	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), grout)
 
-	# Occasional subtle crack polygon
-	if tile_hash % 20 == 0:
-		var cx: float = x + 3.0 + float(tile_hash % 8)
-		var cy: float = y + 4.0 + float((tile_hash / 7) % 7)
-		var cdir: Vector2 = Vector2(1.0, 0.3).rotated(float(tile_hash) * 0.11)
-		var clen: float = 4.0 + float(tile_hash % 5)
-		draw_line(Vector2(cx, cy),
-			Vector2(cx + cdir.x * clen, cy + cdir.y * clen),
-			Color(0, 0, 0, 0.45), 0.7)
-		# Fork
-		if tile_hash % 40 == 0:
-			var cdir2: Vector2 = cdir.rotated(0.6)
-			draw_line(Vector2(cx + cdir.x * clen * 0.5, cy + cdir.y * clen * 0.5),
-				Vector2(cx + cdir.x * clen * 0.5 + cdir2.x * 2.5,
-						cy + cdir.y * clen * 0.5 + cdir2.y * 2.5),
-				Color(0, 0, 0, 0.38), 0.5)
+	# Four flagstones (running-bond stagger by row parity for a continuous field)
+	var stag: int = 3 if (r % 2 == 1) else 0
+	# cell layout: x-cols [1..6] [8..14], y-rows [1..6] [8..14]  (grout lines between)
+	var cells := [
+		[1 + stag, 1, 6, 6, h],
+		[9 + stag, 1, 6, 6, h ^ 0x9e37],
+		[1 + stag, 8, 6, 6, h ^ 0x5151],
+		[9 + stag, 8, 6, 6, h ^ 0xc2b2],
+	]
+	for cell in cells:
+		_draw_flag(x + float(cell[0]), y + float(cell[1]), int(cell[2]), int(cell[3]),
+			d, m, l, int(cell[4]))
 
-	# Tiny grain speck
-	if tile_hash % 13 == 5:
-		draw_rect(Rect2(x + 4 + float(tile_hash % 7), y + 3 + float(tile_hash % 9), 1, 1),
-			Color(0, 0, 0, 0.25))
+	# Decorative variants — sparse, deterministic
+	var variant: int = h % 100
+	if variant < 6:
+		# Moss creep in a corner
+		var mcol: Color = p["moss"]
+		var mx: float = x + (2.0 if (h & 1) == 0 else 9.0)
+		var my: float = y + (2.0 if (h & 2) == 0 else 9.0)
+		for sp in range(5):
+			var ox: float = float((h >> (sp * 2)) % 5)
+			var oy: float = float((h >> (sp * 2 + 1)) % 5)
+			draw_rect(Rect2(mx + ox, my + oy, 1, 1),
+				mcol.lerp(d, 0.2) if (sp % 2 == 0) else mcol)
+	elif variant < 10:
+		# Hairline cracks across a stone
+		var cx: float = x + 3.0 + float(h % 6)
+		var cy: float = y + 4.0 + float((h / 7) % 6)
+		var cdir: Vector2 = Vector2(1.0, 0.35).rotated(float(h) * 0.11)
+		var clen: float = 5.0 + float(h % 4)
+		draw_line(Vector2(cx, cy), Vector2(cx + cdir.x * clen, cy + cdir.y * clen),
+			grout.lerp(Color.BLACK, 0.4), 1.0)
+	elif variant == 11 and floor_id >= 3:
+		# Arcane inlay diamond (vault floors)
+		var acol: Color = p["accent"]
+		var pulse: float = 0.45 + sin(_t * 1.8 + float(h) * 0.3) * 0.25
+		var cc: Vector2 = Vector2(x + 8, y + 8)
+		draw_colored_polygon(PackedVector2Array([
+			cc + Vector2(0, -3), cc + Vector2(3, 0), cc + Vector2(0, 3), cc + Vector2(-3, 0)
+		]), Color(acol.r, acol.g, acol.b, pulse))
 
-	# Theme-specific subtle accents
-	match floor_id:
-		1:
-			if tile_hash % 17 == 3:
-				draw_circle(Vector2(x + 5 + float(tile_hash % 6), y + 9 + float(tile_hash % 5)),
-					0.6, Color(0.85, 0.70, 0.45, 0.16))
-		_:
-			# Arcane glimmer in dark mode
-			if tile_hash % 23 == 1:
-				var glowp: float = 0.14 + sin(_t * 1.7 + float(tile_hash) * 0.3) * 0.08
-				draw_circle(Vector2(x + 6 + float(tile_hash % 5), y + 8 + float(tile_hash % 4)),
-					0.7, Color(0.55, 0.40, 0.95, glowp))
+	# Worn polish glints near accent zones (floor 1 = coin-warm, deeper = arcane)
+	if floor_id == 1 and variant == 14:
+		draw_rect(Rect2(x + 5 + float(h % 5), y + 6 + float(h % 6), 1, 1),
+			Color(p["accent"].r, p["accent"].g, p["accent"].b, 0.5))
 
-	# Warm overlay for tiles near a torch
-	var tcx: float = x + TILE_SIZE * 0.5
-	var tcy: float = y + TILE_SIZE * 0.5
-	for tp: Vector2 in TORCHES:
-		var d2: float = (tp.x - tcx) * (tp.x - tcx) + (tp.y - tcy) * (tp.y - tcy)
-		if d2 < 3600.0:  # within 60px
-			var falloff: float = 1.0 - sqrt(d2) / 60.0
-			falloff = clamp(falloff, 0.0, 1.0)
-			var warm_a: float = falloff * falloff * 0.22
-			draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE),
-				Color(1.0, 0.72, 0.25, warm_a))
+# One flagstone: vertical light→dark ramp with lit top edge + shadowed base.
+func _draw_flag(sx: float, sy: float, w: int, hgt: int, d: Color, m: Color, l: Color, seed: int) -> void:
+	# Per-stone value jitter so the field reads as natural stone, not a grid.
+	var j: float = float(seed % 7) * 0.018 - 0.05
+	var sd: Color = Color(clamp(d.r + j, 0, 1), clamp(d.g + j, 0, 1), clamp(d.b + j, 0, 1))
+	var sm: Color = Color(clamp(m.r + j, 0, 1), clamp(m.g + j, 0, 1), clamp(m.b + j, 0, 1))
+	var sl: Color = Color(clamp(l.r + j, 0, 1), clamp(l.g + j, 0, 1), clamp(l.b + j, 0, 1))
+	# Body ramp in bands (top lit → bottom shadow)
+	draw_rect(Rect2(sx, sy, w, hgt), sm)
+	draw_rect(Rect2(sx, sy, w, 1), sl)                          # lit top edge
+	draw_rect(Rect2(sx, sy + 1, w, 1), sm.lerp(sl, 0.45))       # upper light
+	draw_rect(Rect2(sx, sy + hgt - 2, w, 2), sm.lerp(sd, 0.7))  # lower shadow
+	draw_rect(Rect2(sx, sy + hgt - 1, w, 1), sd)                # base
+	draw_rect(Rect2(sx + w - 1, sy + 1, 1, hgt - 1), sm.lerp(sd, 0.55))  # right bevel
+	draw_rect(Rect2(sx, sy + 1, 1, hgt - 2), sm.lerp(sl, 0.25))          # left catch-light
+	# A speck or two of mineral texture
+	if seed % 3 == 0:
+		draw_rect(Rect2(sx + 2 + float(seed % 3), sy + 2 + float((seed / 4) % 3), 1, 1),
+			sm.lerp(sd, 0.5))
+	if seed % 5 == 2:
+		draw_rect(Rect2(sx + 3 + float(seed % 2), sy + 3 + float((seed / 3) % 2), 1, 1),
+			sl.lerp(Color.WHITE, 0.15))
 
 # ── Wall tile (Hades-style tall imposing stone block) ─────────────────────────
 func _draw_wall_tile(x: float, y: float, c: int, r: int, zone: int, floor_id: int, has_floor_south: bool, has_floor_north: bool):
+	# Sprite path — 2.5D block: tall front face hangs south, lit cap on top.
+	var wtex: Texture2D = _tileset_tex()
+	if wtex != null:
+		if has_floor_south:
+			# Front face (16×48) hangs down from the cell, covering ~3 cells south.
+			draw_texture_rect_region(wtex, Rect2(x, y + float(TILE_SIZE), TILE_SIZE, 48), _TR_WALL_FACE)
+			# Grounded contact shadow on the floor below the face.
+			draw_texture_rect_region(wtex, Rect2(x, y + float(TILE_SIZE) + 48, TILE_SIZE, TILE_SIZE), _TR_BASE_SHADOW)
+		# Lit top cap (corner variant when the north side is exposed).
+		var cap_src: Rect2 = _TR_CORNER_CAP if has_floor_north else _TR_WALL_CAP
+		draw_texture_rect_region(wtex, Rect2(x, y, TILE_SIZE, TILE_SIZE), cap_src)
+		# Warm torch glow on the front face (dynamic lighting FX — kept).
+		if has_floor_south:
+			var gfy: float = y + float(TILE_SIZE)
+			var gcx: float = x + TILE_SIZE * 0.5
+			var gcy: float = gfy + 8.0
+			for tp: Vector2 in TORCHES:
+				var gd2: float = (tp.x - gcx) * (tp.x - gcx) + (tp.y - gcy) * (tp.y - gcy)
+				if gd2 < 6400.0:
+					var gfall: float = clamp(1.0 - sqrt(gd2) / 80.0, 0.0, 1.0)
+					var gwarm: float = gfall * gfall * 0.34
+					draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), Color(1.0, 0.74, 0.32, gwarm * 0.45))
+					draw_rect(Rect2(x, gfy, TILE_SIZE, 48), Color(1.0, 0.66, 0.24, gwarm * 0.40))
+		return
+
 	var cw: Color; var ce: Color
 	match zone:
 		0: cw = C_WALL_VAULT;  ce = C_WALL_VAULT_E
 		1: cw = C_WALL_MID;    ce = C_WALL_MID_E
 		_: cw = C_WALL_ENTRY;  ce = C_WALL_ENTRY_E
 
+	var wp: Dictionary = WALL_STONE.get(zone, WALL_STONE.get(1, {}))
 	var tile_hash: int = (c * 31 + r * 17) % 100
-	var v: float = float(tile_hash % 6) * 0.012
+	var jit: float = float(tile_hash % 6) * 0.012 - 0.03
 
-	# Hades palette: bright stone front, very dark floor — extreme contrast
-	var front_col: Color = Color(
-		clamp(cw.r - v * 0.5, 0.05, 1.0),
-		clamp(cw.g - v * 0.3, 0.05, 1.0),
-		clamp(cw.b - v * 0.2, 0.05, 1.0)
-	)
-	var top_col: Color = Color(
-		clamp(ce.r + 0.10, 0.0, 1.0),
-		clamp(ce.g + 0.10, 0.0, 1.0),
-		clamp(ce.b + 0.12, 0.0, 1.0)
-	)
-	var shadow_col: Color = Color(front_col.r * 0.20, front_col.g * 0.18, front_col.b * 0.22)
-	var hi_col: Color = front_col.lightened(0.22)
+	var face_col: Color = wp.get("face", cw)
+	face_col = Color(clamp(face_col.r + jit, 0, 1), clamp(face_col.g + jit, 0, 1), clamp(face_col.b + jit, 0, 1))
+	var face_dk: Color = wp.get("faced", face_col.darkened(0.34))
+	var cap_col: Color = wp.get("cap", ce)
+	var cap_hi:  Color = wp.get("caphi", ce.lightened(0.3))
+	var mortar:  Color = wp.get("mortar", Color(0, 0, 0))
 
-	var top_h: float = 4.0
 	# Tall front face — wall feels like you can't see over it
 	var front_h: float = 48.0 if has_floor_south else float(TILE_SIZE)
 
-	# TOP face — tile footprint, drawn at y (lighter, suggests looking down at the top of the block)
-	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), top_col)
-	# Subtle top highlight strip
-	draw_rect(Rect2(x, y, TILE_SIZE, 1), top_col.lightened(0.22))
-	# Stone speckles on top face
-	if tile_hash % 5 == 0:
-		draw_rect(Rect2(x + 3, y + 2, 3, 1), top_col.darkened(0.15))
+	# TOP CAP face — the lit top of the block (player looks slightly down on it)
+	draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), cap_col)
+	draw_rect(Rect2(x, y, TILE_SIZE, 2), cap_hi)                       # sky-lit top edge
+	draw_rect(Rect2(x, y, 1, TILE_SIZE), cap_col.lightened(0.10))
+	draw_rect(Rect2(x + TILE_SIZE - 1, y, 1, TILE_SIZE), cap_col.darkened(0.18))
+	# Cap stone texture speckles
+	if tile_hash % 4 == 0:
+		draw_rect(Rect2(x + 3, y + 4, 3, 1), cap_col.darkened(0.16))
 	if tile_hash % 7 == 2:
-		draw_rect(Rect2(x + 9, y + 4, 4, 1), top_col.darkened(0.12))
+		draw_rect(Rect2(x + 9, y + 9, 4, 1), cap_col.darkened(0.12))
+	if tile_hash % 5 == 1:
+		draw_rect(Rect2(x + 6, y + 6, 2, 2), cap_col.lightened(0.10))
 
-	# FRONT face — extends downward into the floor tile space below, giving wall depth
-	# This is the classic 2.5D trick: wall face drawn over the floor tile to the south
+	# FRONT face — 2.5D, drawn over the floor tile to the south, with brick courses
 	if has_floor_south:
 		var fy: float = y + float(TILE_SIZE)
-		draw_rect(Rect2(x, fy, TILE_SIZE, front_h), front_col)
+		draw_rect(Rect2(x, fy, TILE_SIZE, front_h), face_col)
+		# Deep seam where cap meets front (strong AO line)
+		draw_rect(Rect2(x, fy, TILE_SIZE, 1), mortar)
+		draw_rect(Rect2(x, fy + 1, TILE_SIZE, 1), face_col.lightened(0.14))  # lit lip
 
-		# Top of front face — brighter seam where top meets front (light hits the corner)
-		draw_rect(Rect2(x, fy, TILE_SIZE, 2), front_col.lightened(0.10))
-		# Bottom of front face — darkens as it falls into shadow
-		draw_rect(Rect2(x, fy + front_h - 4, TILE_SIZE, 4), front_col.darkened(0.22))
+		# Brick courses (8px tall), running-bond offset per course
+		var course: int = 0
+		var cyy: float = fy + 2.0
+		while cyy < fy + front_h:
+			var ch: float = min(8.0, fy + front_h - cyy)
+			# vertical mortar (offset by course parity)
+			var voff: float = 0.0 if ((c + course) % 2 == 0) else 8.0
+			# per-brick shading: top lit, bottom shadow, slight value drift downward
+			var depth: float = (cyy - fy) / front_h           # 0 top → 1 bottom; recede to shadow
+			var bcol: Color = face_col.lerp(face_dk, depth * 0.55)
+			draw_rect(Rect2(x, cyy, TILE_SIZE, ch), bcol)
+			draw_rect(Rect2(x, cyy, TILE_SIZE, 1), bcol.lightened(0.12))        # brick top light
+			draw_rect(Rect2(x, cyy + ch - 1, TILE_SIZE, 1), bcol.darkened(0.30)) # brick base shadow
+			# mortar lines
+			draw_rect(Rect2(x, cyy - 1, TILE_SIZE, 1), mortar)                   # horizontal joint
+			if voff < TILE_SIZE:
+				draw_rect(Rect2(x + voff, cyy, 1, ch), mortar)                   # vertical joint
+			# occasional chipped/worn brick
+			if (tile_hash + course) % 9 == 3:
+				draw_rect(Rect2(x + 3 + float((tile_hash) % 6), cyy + 2, 2, 2), bcol.darkened(0.30))
+			cyy += 8.0
+			course += 1
 
-		# Horizontal mortar joints
-		var joint_col: Color = Color(0, 0, 0, 0.42)
-		var jy: float = fy + 16.0
-		while jy < fy + front_h - 2:
-			draw_line(Vector2(x, jy), Vector2(x + TILE_SIZE, jy), joint_col, 0.8)
-			draw_line(Vector2(x, jy + 1), Vector2(x + TILE_SIZE, jy + 1), Color(1, 1, 1, 0.04), 0.5)
-			jy += 16.0
+		# Left AO strip + right rim light (sculpts the block)
+		draw_rect(Rect2(x, fy, 2, front_h), Color(0, 0, 0, 0.34))
+		draw_rect(Rect2(x + TILE_SIZE - 1, fy, 1, front_h), face_col.lightened(0.18))
 
-		# Vertical mortar joint (stagger by block row for brick offset)
-		var block_row: int = int(fy / 16.0)
-		if (c + block_row) % 2 == 0:
-			draw_line(Vector2(x + 8, fy), Vector2(x + 8, fy + front_h), Color(0, 0, 0, 0.32), 0.7)
+		# Moss / damp at the base for lower floors
+		if floor_id <= 2 and tile_hash % 6 == 1:
+			var mss: Color = wp.get("moss", Color(0.2, 0.25, 0.13))
+			for k in range(4):
+				draw_rect(Rect2(x + 2 + float((tile_hash * (k + 1)) % 12),
+					fy + front_h - 3 - float(k % 3), 1, 2), mss)
 
-		# Dark seam at top of front face (top/front edge)
-		draw_line(Vector2(x, fy), Vector2(x + TILE_SIZE, fy), Color(0, 0, 0, 0.70), 1.2)
-
-		# Left shadow strip (wall is darker on left — ambient occlusion)
-		draw_rect(Rect2(x, fy, 2, front_h),
-			Color(shadow_col.r * 0.6, shadow_col.g * 0.6, shadow_col.b * 0.7, 0.80))
-		# Right highlight strip
-		draw_rect(Rect2(x + TILE_SIZE - 1, fy, 1, front_h), hi_col)
-
-		# Stone chip details
-		if tile_hash % 9 == 3:
-			draw_rect(Rect2(x + 3, fy + 6, 2, 2), front_col.darkened(0.28))
-		if tile_hash % 11 == 5:
-			draw_rect(Rect2(x + TILE_SIZE - 5, fy + 14, 2, 1), front_col.darkened(0.18))
-		if tile_hash % 17 == 9 and front_h > 24:
-			draw_rect(Rect2(x + 7, fy + 28, 3, 1), front_col.darkened(0.22))
-
-		# Drop shadow on floor just below the wall face
-		draw_rect(Rect2(x, fy + front_h, TILE_SIZE, 5),
-			Color(0, 0, 0, 0.50))
-		draw_rect(Rect2(x, fy + front_h + 5, TILE_SIZE, 4),
-			Color(0, 0, 0, 0.25))
+		# Drop shadow on floor below the wall face
+		draw_rect(Rect2(x, fy + front_h, TILE_SIZE, 5), Color(0, 0, 0, 0.50))
+		draw_rect(Rect2(x, fy + front_h + 5, TILE_SIZE, 4), Color(0, 0, 0, 0.25))
 
 		# Warm torch glow on front face
 		var wcx: float = x + TILE_SIZE * 0.5
-		var wcy: float = fy
+		var wcy: float = fy + 8.0
 		for tp: Vector2 in TORCHES:
 			var d2: float = (tp.x - wcx) * (tp.x - wcx) + (tp.y - wcy) * (tp.y - wcy)
-			if d2 < 4900.0:
-				var falloff: float = 1.0 - sqrt(d2) / 70.0
+			if d2 < 6400.0:
+				var falloff: float = 1.0 - sqrt(d2) / 80.0
 				falloff = clamp(falloff, 0.0, 1.0)
-				var warm_a: float = falloff * falloff * 0.30
-				draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), Color(1.0, 0.72, 0.25, warm_a * 0.7))
-				draw_rect(Rect2(x, fy, TILE_SIZE, 8), Color(1.0, 0.68, 0.22, warm_a * 0.55))
+				var warm_a: float = falloff * falloff * 0.34
+				draw_rect(Rect2(x, y, TILE_SIZE, TILE_SIZE), Color(1.0, 0.74, 0.32, warm_a * 0.6))
+				draw_rect(Rect2(x, fy, TILE_SIZE, front_h), Color(1.0, 0.66, 0.24, warm_a * 0.5))
 
-	# Theme accents
-	match floor_id:
-		1:
-			draw_rect(Rect2(x, y, TILE_SIZE, 1), Color(1.0, 0.78, 0.40, 0.20))
-		3:
-			if tile_hash % 13 == 7:
-				var ap: float = 0.22 + sin(_t * 1.5 + float(tile_hash)) * 0.10
-				draw_circle(Vector2(x + 6 + float(tile_hash % 5),
-					y + float(TILE_SIZE) + 6 + float(tile_hash % 8)),
-					0.7, Color(0.55, 0.40, 0.90, ap))
+	# Arcane veining on deep-floor walls
+	if floor_id >= 3 and tile_hash % 13 == 7:
+		var ap: float = 0.22 + sin(_t * 1.5 + float(tile_hash)) * 0.10
+		draw_circle(Vector2(x + 6 + float(tile_hash % 5), y + 6 + float(tile_hash % 6)),
+			0.8, Color(0.55, 0.40, 0.90, ap))
 
 # ── Torch flame (multi-layer animated) ────────────────────────────────────────
 func _draw_torch_flame(tp: Vector2, i: int):
@@ -604,6 +747,10 @@ func _draw_torch_flame(tp: Vector2, i: int):
 
 # ── Furniture collision ───────────────────────────────────────────────────────
 func _build_furniture_collision():
+	# Hand-placed furniture (and its collision) is authored for the CLASSIC
+	# building only. New floorplans stay clean — no furniture, no blockers.
+	if _plan_idx != 0:
+		return
 	var body := StaticBody2D.new()
 	body.name = "Furniture"
 	add_child(body)
@@ -669,6 +816,10 @@ func _draw_zone_labels(font: Font):
 
 # ── Room furniture ────────────────────────────────────────────────────────────
 func _draw_room_furniture():
+	# Hand-authored furniture is CLASSIC-only; new plans draw light generic dressing.
+	if _plan_idx != 0:
+		_draw_generic_furniture()
+		return
 	_draw_entry_furniture()
 	_draw_barracks_furniture()
 	_draw_storeroom_furniture()
@@ -676,6 +827,24 @@ func _draw_room_furniture():
 	_draw_antechamber_furniture()
 	_draw_vault_furniture()
 	_draw_armory_furniture()
+
+# Decorative-only dressing for procedural plans: a soft rug at each room centre
+# (no collision) so rooms don't read as empty boxes.
+func _draw_generic_furniture():
+	for room in _plan.get("rooms", []):
+		var rect: Rect2i = room["rect"]
+		var c := _Floorplans.room_center(rect)
+		var kind: String = room.get("kind", "store")
+		var rw: float = minf(float(rect.size.x) * TILE_SIZE * 0.5, 56.0)
+		var rh: float = minf(float(rect.size.y) * TILE_SIZE * 0.5, 40.0)
+		var rug: Color = Color(0.30, 0.16, 0.16, 0.30)
+		if kind == "vault":
+			rug = Color(0.40, 0.34, 0.10, 0.32)
+		elif kind == "entry":
+			rug = Color(0.18, 0.20, 0.30, 0.28)
+		draw_rect(Rect2(c.x - rw * 0.5, c.y - rh * 0.5, rw, rh), rug)
+		draw_rect(Rect2(c.x - rw * 0.5, c.y - rh * 0.5, rw, rh),
+			Color(rug.r, rug.g, rug.b, 0.5), false, 1.0)
 
 # ─── FURNITURE: BED (3/4 isometric) ───────────────────────────────────────────
 func _svg_bed(x: float, y: float, w: float, h: float):

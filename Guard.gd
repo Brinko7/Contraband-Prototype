@@ -45,6 +45,20 @@ var _held_timer   := 0.0
 var _is_stunned   := false   # Dwarf battle cry
 var _stun_timer   := 0.0
 
+# ── V12 Status effect vars ────────────────────────────────────────────────────
+var _is_prone:             bool  = false   # knocked down; next hit auto-crits
+var _prone_timer:          float = 0.0
+var _is_feared:            bool  = false   # flees, won't attack
+var _fear_timer:           float = 0.0
+var _bleeding:             bool  = false   # 1 dmg every 5s for 20s
+var _bleed_timer:          float = 0.0    # total bleed duration remaining
+var _bleed_damage_timer:   float = 0.0    # ticks down to 0, then deals dmg + resets
+var _is_slowed:            bool  = false   # -30% move speed
+var _slow_timer:           float = 0.0
+var _is_marked:            bool  = false   # other guards see through smoke near this guard
+var _is_staggered_extra:   bool  = false   # extra stun duration from WAR_PICK
+var _base_move_interval:   float = -1.0   # cached for slow restore
+
 # How fast the detection bar fills (seconds to fill from 0→1)
 var detect_fill_rate: Dictionary = {}
 const DETECT_DRAIN_RATE = 0.4  # per second when not seeing player
@@ -64,11 +78,18 @@ var investigate_delay_ticks := 0
 var de_escalate_timer := 0.0
 var detection_progress   := 0.0
 var _boss_summoned_once  := false  # boss calls reinforcements once at 50% detection
-var _can_see_player := false
+var _can_see_player      := false
+var _was_seeing_player   := false  # last frame's value for LKP trigger
+var _lkp_search_done     := false  # true once we've built the LKP search pattern
 var _detect_tick_played := false
 var player: Node2D = null
 var _footprints: Array[Vector2] = []
 var _anim_t := 0.0
+
+# ── V14 Guard Fatigue ─────────────────────────────────────────────────────────
+var _fatigue_t:       float = 0.0   # time since last detection event
+var _fatigue_drowsy:  bool  = false  # brief drowse window: detection 70% slower
+var _fatigue_drowsy_t: float = 0.0  # remaining drowse duration
 
 # Body discovery — 6s window before full alert
 var _spotted_body: Node = null
@@ -129,6 +150,7 @@ var show_stats: bool = false        # set by guard_weakness intel — reveals HP
 
 func _ready():
 	add_to_group("guards")
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	detect_fill_rate = { AlertState.UNAWARE: 0.9, AlertState.SUSPICIOUS: 0.5 }
 	player = get_tree().get_first_node_in_group("player")
 	if player and player.has_signal("noise_emitted"):
@@ -162,6 +184,12 @@ func _ready():
 	# Goblin and Skeleton drop nothing
 	# V7: pure SVG procedural art — no sprite sheet
 	_sprite = null
+	# V12: cache base vision/detection for off-duty modifier resets
+	_base_vision_range           = vision_range
+	_base_detect_fill_unaware    = detect_fill_rate[AlertState.UNAWARE]
+	_base_detect_fill_suspicious = detect_fill_rate[AlertState.SUSPICIOUS]
+	# V12: shift change timer (distinct from existing _shift_timer)
+	_shift_change_t = randf_range(45.0, 90.0)
 
 func _apply_modifier():
 	match GameManager.run_modifier:
@@ -189,6 +217,20 @@ func _apply_modifier():
 			vision_angle   *= 0.75
 		"FOG":
 			vision_range = max(25.0, vision_range - 40.0)
+		"BLOODHOUND":
+			# All guards get gnoll-like scent radius
+			if enemy_type != EnemyType.GNOLL:
+				enemy_type = EnemyType.GNOLL   # borrow gnoll smell logic
+		"PITCH_BLACK":
+			vision_range = max(24.0, vision_range - 55.0)
+			vision_angle *= 0.50   # guards rely on proximity, not cone
+		"CURSED":
+			detect_fill_rate[AlertState.UNAWARE]    *= 0.75  # traps invisible ≈ faster detection
+			detect_fill_rate[AlertState.SUSPICIOUS] *= 0.75
+		"HAUNT":
+			if enemy_type == EnemyType.SKELETON:
+				# Skeletons don't de-escalate in HAUNT
+				de_escalate_timer = 9999.0
 	# Alert escalation pressure
 	if GameManager.alert_escalation >= 4:
 		vision_range += 10.0
@@ -230,6 +272,56 @@ func _process(delta):
 			_is_stunned = false
 		queue_redraw()
 		return
+
+	# ── V12 Status effect ticks ───────────────────────────────────────────────
+	# PRONE — ticks down; guard gets up on its own
+	if _is_prone:
+		_prone_timer -= delta
+		if _prone_timer <= 0.0:
+			_is_prone = false
+		queue_redraw()
+
+	# FEARED — guard flees toward edge of room, won't attack
+	if _is_feared:
+		_fear_timer -= delta
+		if _fear_timer <= 0.0:
+			_is_feared = false
+		else:
+			# Move away from the last known player position
+			if player != null:
+				var flee_dir: Vector2 = (global_position - player.global_position).normalized()
+				var spd: float = 40.0
+				velocity = flee_dir * spd
+				move_and_slide()
+			queue_redraw()
+			return  # Skip normal AI while fleeing
+
+	# SLOWED — restore interval when timer expires
+	if _is_slowed:
+		_slow_timer -= delta
+		if _slow_timer <= 0.0:
+			_is_slowed = false
+			if _base_move_interval > 0.0:
+				move_interval  = _base_move_interval
+				chase_interval = _base_move_interval * 0.65
+
+	# BLEEDING — 1 damage every 5s for up to _bleed_timer total duration
+	if _bleeding:
+		_bleed_timer -= delta
+		_bleed_damage_timer -= delta
+		if _bleed_damage_timer <= 0.0:
+			_bleed_damage_timer = 5.0
+			guard_hp -= 1
+			_hurt_flash_t = 0.15
+			queue_redraw()
+			# Spawn small blood drip popup
+			_popup("bleed -1", Color(0.85, 0.12, 0.12))
+			if guard_hp <= 0:
+				takedown(false)
+				return
+		if _bleed_timer <= 0.0:
+			_bleeding = false
+
 	# Patrol shift timer
 	if alert_state == AlertState.UNAWARE and _shifts_done < SHIFT_TIMES.size():
 		_shift_timer += delta
@@ -261,6 +353,21 @@ func _process(delta):
 				_spotted_body = null
 				_find_body(investigate_pos)
 
+	# ── V14: Guard fatigue — drowse if nothing detected for 40s ─────────────────
+	if alert_state == AlertState.UNAWARE and not _fatigue_drowsy:
+		_fatigue_t += delta
+		if _fatigue_t >= 40.0 and not is_boss and not is_captain and not is_inquisitor:
+			_fatigue_t = 0.0
+			_fatigue_drowsy   = true
+			_fatigue_drowsy_t = 2.0 + randf_range(0.0, 1.5)
+			_popup("...zz", Color(0.60, 0.70, 0.90, 0.85))
+			patrol_wait = maxf(patrol_wait, _fatigue_drowsy_t)
+	if _fatigue_drowsy:
+		_fatigue_drowsy_t -= delta
+		if _fatigue_drowsy_t <= 0.0:
+			_fatigue_drowsy = false
+		queue_redraw()
+
 	_check_vision()
 	_check_bodies()
 	# Gnoll smell — proximity detection regardless of facing/vision
@@ -285,6 +392,24 @@ func _process(delta):
 		if _footprints.size() > 4:
 			_footprints.pop_front()
 	_update_de_escalation(delta)
+	# V12: environment scan (open doors, extinguished torches)
+	_env_scan_t -= delta
+	if _env_scan_t <= 0.0:
+		_env_scan_t = _ENV_SCAN_INTERVAL
+		_scan_environment()
+	# V12: shift change popup timer decay
+	if _shift_change_popup_t > 0.0:
+		_shift_change_popup_t -= delta
+	# V12: SLEEPING guard — wake on loud noise (handled in _on_noise_emitted below)
+	# V12: shift change mechanic
+	if alert_state == AlertState.UNAWARE and _shift_change_t > 0.0:
+		_shift_change_t -= delta
+		if _shift_change_t <= 0.0:
+			_shift_change_t = 0.0   # disarm (one-time per run)
+			patrol_wait = 3.0
+			facing = -facing  # reverse facing direction
+			_shift_change_popup_t = 2.0
+			_popup("SHIFT CHANGE", Color(0.85, 0.85, 0.50))
 	# HEX_CASTER bolt
 	if is_hex_caster and alert_state == AlertState.ALERT and player != null:
 		_hex_charge_t += delta
@@ -352,6 +477,9 @@ func _update_detection(delta):
 		# LVL_STEALTH_BONUS level-up reward
 		if GameManager.has_passive("LVL_STEALTH_BONUS"):
 			detect_mult *= 0.80
+		# V14: drowsy guard detects much slower
+		if _fatigue_drowsy:
+			detect_mult *= 0.30
 		# CURSED_MASK relic: guards in shadow cannot detect player
 		if GameManager.has_relic("CURSED_MASK") and player != null:
 			var guard_in_shadow := false
@@ -397,6 +525,9 @@ func _update_de_escalation(delta):
 		return
 	# CRACKDOWN: guards never de-escalate
 	if GameManager.run_modifier == "CRACKDOWN":
+		return
+	# V15: HAUNT complication — ALERT guards never de-escalate
+	if GameManager.floor_complication == "HAUNT" and alert_state == AlertState.ALERT:
 		return
 	de_escalate_timer -= delta
 	if de_escalate_timer > 0.0:
@@ -519,6 +650,13 @@ func _update_chase(delta):
 	move_timer -= delta
 	if move_timer > 0.0:
 		return
+	# V12: formation search — if we can't see player, cycle search pattern
+	if not _can_see_player and _search_pattern.size() > 0:
+		var target: Vector2 = _search_pattern[_search_idx % _search_pattern.size()]
+		if global_position.distance_to(target) < 4.0:
+			_search_idx = (_search_idx + 1) % _search_pattern.size()
+		_step_toward(target, _get_chase_interval())
+		return
 	_step_toward(player.global_position, _get_chase_interval())
 
 func _step_toward(target_world: Vector2, interval: float):
@@ -564,6 +702,9 @@ func _check_vision():
 	_can_see_player = false
 	if player == null:
 		return
+	# V12: sleeping guards are blind
+	if off_duty_state == OffDutyState.SLEEPING:
+		return
 	# Hidden player cannot be seen
 	if player.get("is_hidden") == true:
 		return
@@ -604,8 +745,38 @@ func _check_vision():
 		_can_see_player = true
 		investigate_pos = player.global_position
 		de_escalate_timer = ALERT_TIMEOUT if alert_state == AlertState.ALERT else SUSPICIOUS_TIMEOUT
+		_lkp_search_done = false   # reset so we re-build if we lose sight again
+		# V14: seeing player wakes a drowsy guard and resets fatigue
+		if _fatigue_drowsy:
+			_fatigue_drowsy = false
+			_fatigue_drowsy_t = 0.0
+		_fatigue_t = 0.0
+
+	# ── Last-Known-Position: just lost sight while ALERT → trigger LKP sweep ──
+	if _was_seeing_player and not _can_see_player and alert_state == AlertState.ALERT \
+			and not _lkp_search_done:
+		_lkp_search_done = true
+		_build_search_pattern(investigate_pos)   # V12: sweeps around last seen pos
+		_search_idx = 0
+		_popup("⚑", Color(1.0, 0.70, 0.20))    # visual tell: question mark-style
+		# V14: whistle — alert nearby guards that weren't already alert
+		for g in get_tree().get_nodes_in_group("guards"):
+			if g == self or not is_instance_valid(g):
+				continue
+			if global_position.distance_to(g.global_position) <= 96.0 \
+					and g.get("alert_state") != AlertState.ALERT:
+				g._become_suspicious(investigate_pos)
+				g._popup("!", Color(1.0, 0.80, 0.25))
+	_was_seeing_player = _can_see_player
 
 func _on_noise_emitted(level: int, world_position: Vector2):
+	# V12: SLEEPING guard wakes on noise level 2+ within 48px
+	if off_duty_state == OffDutyState.SLEEPING:
+		if level >= 2 and global_position.distance_to(world_position) <= 48.0:
+			set_off_duty(OffDutyState.NONE)
+			_popup("Wh—!?", Color(1.0, 0.80, 0.20))
+		else:
+			return  # sleeping guards ignore quiet noise
 	# Silence zone suppresses noise detection
 	for zone in get_tree().get_nodes_in_group("silence_zones"):
 		if zone.has_method("contains") and zone.contains(world_position):
@@ -626,6 +797,7 @@ func _find_body(body_pos: Vector2):
 	alert_state = AlertState.ALERT
 	investigate_pos = body_pos
 	de_escalate_timer = ALERT_TIMEOUT
+	_fatigue_drowsy = false; _fatigue_t = 0.0   # V14: body discovery wakes guard
 	GameManager.floor_bodies_found += 1
 	GameManager.record_alert()
 	_popup("BODY!", Color(1.0, 0.12, 0.12))
@@ -738,6 +910,14 @@ func _enter_alert() -> void:
 	de_escalate_timer = ALERT_TIMEOUT
 	GameManager.record_alert()
 	_popup("!", Color(1.0, 0.25, 0.10))
+	# V12: build formation search pattern around last known position
+	var search_center: Vector2 = investigate_pos if investigate_pos != Vector2.ZERO \
+								 else (player.global_position if player else global_position)
+	_build_search_pattern(search_center)
+	# V12: captains, bosses, brutes, and high-escalation guards call nearby guards
+	var gm_escalation: int = GameManager.get("alert_escalation") if GameManager.get("alert_escalation") != null else 0
+	if is_captain or is_boss or is_brute or gm_escalation >= 4:
+		_call_nearby_guards(120.0)
 
 func apply_hold(duration: float):
 	_is_held    = true
@@ -754,6 +934,11 @@ func stagger(duration: float):
 	_is_stunned = true
 	_stun_timer = duration
 	_popup("STAGGERED", Color(0.90, 0.55, 0.15))
+
+func apply_fear(duration: float):
+	_is_feared  = true
+	_fear_timer = duration
+	_popup("FEARED!", Color(0.65, 0.35, 0.90))
 
 func hurt(damage: int, hit_dir: Vector2 = Vector2.ZERO):
 	guard_hp -= damage
@@ -804,6 +989,62 @@ func hurt(damage: int, hit_dir: Vector2 = Vector2.ZERO):
 	queue_redraw()
 	if guard_hp <= 0:
 		takedown(false)
+		return
+	# V14: Guard surrender — human guards at 1 HP may beg for mercy (25% chance)
+	if guard_hp == 1 and enemy_type == EnemyType.HUMAN and not is_boss and not is_captain:
+		if randf() < 0.25 and alert_state != AlertState.ALERT:
+			_surrender()
+
+# ── V12: Weapon-based status effect application ───────────────────────────────
+# Called by player's _apply_weapon_status_to_guard() after a successful hit.
+func apply_weapon_status(weapon_id: String) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	match weapon_id:
+		"SHIV", "STILETTO", "ASSASSIN_FANG":
+			# 35% chance BLEEDING — 1 dmg every 5s for 20s
+			if rng.randf() < 0.35 and not _bleeding:
+				_bleeding = true
+				_bleed_timer = 20.0
+				_bleed_damage_timer = 5.0
+				_popup("BLEEDING!", Color(0.88, 0.12, 0.12))
+		"WAR_PICK":
+			# 50% chance STAGGERED (extra 0.3s stun duration on top of existing stagger)
+			if rng.randf() < 0.50:
+				_stun_timer += 0.30
+				_is_stunned  = true
+				_is_staggered_extra = true
+				_popup("STAGGERED!", Color(0.90, 0.55, 0.15))
+		"WAND":
+			# 40% chance FEARED — guard flees for 3s, won't attack
+			if rng.randf() < 0.40 and not _is_feared:
+				_is_feared  = true
+				_fear_timer = 3.0
+				_popup("FEARED!", Color(0.65, 0.35, 0.90))
+		"VOID_REAPER":
+			# Always MARKED — guards see through smoke near this guard
+			if not _is_marked:
+				_is_marked = true
+				set_meta("is_marked", true)
+				_popup("MARKED!", Color(0.45, 0.12, 0.65))
+		"SPEAR":
+			# 30% chance SLOWED — -30% move speed for 8s
+			if rng.randf() < 0.30 and not _is_slowed:
+				_is_slowed = true
+				_slow_timer = 8.0
+				if _base_move_interval < 0.0:
+					_base_move_interval = move_interval
+				move_interval  = move_interval  * 1.43  # +43% interval ≈ -30% speed
+				chase_interval = chase_interval * 1.43
+				_popup("SLOWED!", Color(0.30, 0.55, 0.90))
+		"BROADSWORD":
+			# 25% chance PRONE — knocked down; next hit auto-crits
+			if rng.randf() < 0.25 and not _is_prone:
+				_is_prone      = true
+				_prone_timer   = 2.5
+				_is_stunned    = true
+				_stun_timer    = max(_stun_timer, 1.0)
+				_popup("PRONE!", Color(0.95, 0.75, 0.20))
 
 func takedown(attacker_is_sneaking: bool, is_dart: bool = false):
 	# Skeleton is immune to dart/soporific attacks
@@ -832,6 +1073,25 @@ func takedown(attacker_is_sneaking: bool, is_dart: bool = false):
 	_spawn_death_effects(_kill_dir)
 	_spawn_body(_kill_dir)
 	queue_free()
+
+# ── V14: Guard surrender — disarmed; stands still for 20s ────────────────────
+func _surrender() -> void:
+	# Switch to inert state: stop patrolling, zero vision, can't attack
+	alert_state = AlertState.UNAWARE
+	de_escalate_timer = 0.0
+	vision_range = 0.0
+	vision_angle = 0.0
+	move_interval = 999.0
+	patrol_points.clear()
+	_is_stunned  = true
+	_stun_timer  = 20.0   # 20s of cowering
+	set_meta("surrendered", true)
+	var msgs: Array = ["I yield! Please!", "Mercy! I have a family!", "I'm done — spare me!"]
+	var msg: String = msgs[randi() % msgs.size()]
+	_popup(msg, Color(0.90, 0.85, 0.50))
+	# Rep bonus for mercy (player didn't kill)
+	GameManager.add_gold(15)
+	queue_redraw()
 
 func _boss_summon_backup():
 	_popup("%s calls for guards!" % GameManager.boss_name, Color(1.0, 0.30, 0.10))
@@ -913,10 +1173,93 @@ func _draw():
 	# ── SVG Guard body + weapon silhouette (with knockback offset) ────────────
 	if _draw_offset != Vector2.ZERO:
 		draw_set_transform(_draw_offset, 0.0, Vector2.ONE)
+	# PRONE: tilt guard sideways
+	if _is_prone:
+		draw_set_transform(_draw_offset, PI * 0.42, Vector2.ONE)
 	_draw_guard_svg(f, perp2)
 	_draw_guard_weapon(f, perp2)
-	if _draw_offset != Vector2.ZERO:
+	if _is_prone:
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	elif _draw_offset != Vector2.ZERO:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	else:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+	# ── V12 Status effect visuals ─────────────────────────────────────────────
+	# BLEEDING: dripping red particles below guard
+	if _bleeding:
+		var drip_alpha: float = clampf((_bleed_timer / 20.0) * 0.85, 0.25, 0.85)
+		var drip_col := Color(0.82, 0.05, 0.05, drip_alpha)
+		for i in range(3):
+			var dx: float = sin(_anim_t * 1.8 + i * 2.1) * 3.5
+			var dy: float = 6.0 + i * 3.0 + fmod(_anim_t * 12.0 + i * 4.0, 8.0)
+			draw_circle(Vector2(dx, dy), 1.0 + 0.5 * float(i % 2), drip_col)
+
+	# FEARED: exclamation marks orbiting + panic ring
+	if _is_feared:
+		var panic_alpha: float = 0.55 + 0.3 * abs(sin(_anim_t * 6.0))
+		draw_arc(Vector2.ZERO, 11.0, 0.0, TAU, 24, Color(0.72, 0.30, 0.90, panic_alpha), 1.5)
+		for i in range(3):
+			var ang: float = _anim_t * 3.5 + i * (TAU / 3.0)
+			var ep := Vector2(cos(ang), sin(ang)) * 13.0
+			draw_circle(ep, 1.5, Color(0.85, 0.80, 0.15, 0.85))
+
+	# MARKED: persistent magenta dot above head
+	if _is_marked:
+		var mark_pulse: float = 0.65 + 0.35 * abs(sin(_anim_t * 3.0))
+		draw_circle(Vector2(0.0, -16.0), 2.5, Color(0.75, 0.12, 0.85, mark_pulse))
+
+	# SLOWED: blue shimmer ring
+	if _is_slowed:
+		var slow_alpha: float = 0.35 + 0.15 * abs(sin(_anim_t * 2.0))
+		draw_arc(Vector2.ZERO, 8.0, 0.0, TAU, 16, Color(0.28, 0.55, 0.95, slow_alpha), 1.0)
+
+	# ── Wound state visuals ───────────────────────────────────────────────────
+	if guard_max_hp > 0:
+		var hp_frac: float = float(guard_hp) / float(guard_max_hp)
+		if hp_frac <= 0.25 and guard_hp > 0:
+			# CRITICAL: pulsing red halo + deep slash marks
+			var crit_pulse: float = 0.55 + 0.45 * abs(sin(_anim_t * 8.0))
+			draw_arc(Vector2.ZERO, 10.5, 0.0, TAU, 20,
+				Color(0.95, 0.10, 0.08, crit_pulse * 0.70), 2.2)
+			# Three diagonal slash marks on body
+			for i in range(3):
+				var sx: float = -3.5 + i * 3.5
+				draw_line(Vector2(sx - 2, -8 + i), Vector2(sx + 2, -3 + i),
+					Color(0.88, 0.05, 0.05, 0.75), 1.2)
+			# Blood pooling at feet
+			var drip_a: float = 0.5 + 0.3 * sin(_anim_t * 5.0)
+			draw_circle(Vector2(0, 6), 2.5 + 0.8 * abs(sin(_anim_t * 3.0)),
+				Color(0.70, 0.02, 0.02, drip_a))
+		elif hp_frac <= 0.50:
+			# WOUNDED: faint red X on torso + wound dot
+			draw_line(Vector2(-3, -9), Vector2(3, -3),
+				Color(0.90, 0.08, 0.08, 0.65), 1.5)
+			draw_line(Vector2(3, -9), Vector2(-3, -3),
+				Color(0.90, 0.08, 0.08, 0.65), 1.5)
+			draw_circle(Vector2(0, -6), 1.5, Color(0.95, 0.12, 0.12, 0.60))
+
+	# ── V14: Surrendered guard — white flag visual ───────────────────────────────
+	if get_meta("surrendered", false):
+		# White flag pole
+		draw_line(Vector2(2, -14), Vector2(2, -4), Color(0.85, 0.85, 0.75, 0.95), 1.5)
+		# White flag waving
+		var wave: float = sin(_anim_t * 6.0) * 1.5
+		draw_rect(Rect2(2, -14 + wave, 6, 4), Color(0.92, 0.92, 0.88, 0.90))
+		# Hands-up arc
+		draw_arc(Vector2.ZERO, 9.0, -PI * 0.7, -PI * 0.3, 10,
+			Color(0.88, 0.80, 0.60, 0.60), 1.2)
+
+	# ── V14: Drowsy guard — drifting "zz" particles above head ──────────────────
+	if _fatigue_drowsy:
+		for i in range(2):
+			var drift_x: float = sin(_anim_t * 1.4 + i * 1.8) * 3.0
+			var drift_y: float = -14.0 - fmod(_anim_t * 8.0 + i * 6.0, 10.0)
+			var za: float = 0.45 + 0.3 * abs(sin(_anim_t * 2.5 + i))
+			draw_circle(Vector2(drift_x, drift_y), 1.5 - 0.5 * float(i), Color(0.55, 0.65, 0.95, za))
+		# Drooping eyelid line on face region
+		var eye_a: float = 0.5 + 0.3 * abs(sin(_anim_t * 3.0))
+		draw_line(Vector2(-3.5, -9.5), Vector2(3.5, -9.5), Color(0.20, 0.15, 0.40, eye_a), 2.0)
 
 	var half_angle    := deg_to_rad(vision_angle / 2.0)
 	var facing_angle  := facing.angle()
@@ -956,7 +1299,11 @@ func _draw():
 		AlertState.UNAWARE:
 			cr=0.85; cg=0.78; cb=0.45; base_alpha=0.03; pulse_speed=0.0
 		AlertState.SUSPICIOUS:
-			cr=0.90; cg=0.70; cb=0.15; base_alpha=0.07; pulse_speed=2.0
+			# V12: called guards show orange cone instead of yellow
+			if _was_called:
+				cr=1.0; cg=0.50; cb=0.10; base_alpha=0.07; pulse_speed=2.0
+			else:
+				cr=0.90; cg=0.70; cb=0.15; base_alpha=0.07; pulse_speed=2.0
 		AlertState.ALERT:
 			cr=0.90; cg=0.15; cb=0.10; base_alpha=0.12; pulse_speed=5.0
 		_:
@@ -1105,14 +1452,81 @@ func _draw():
 			draw_circle(bolt_local, 3.5, Color(0.75, 0.25, 1.00, 0.90))
 			draw_circle(bolt_local, 2.0, Color(1.00, 0.80, 1.00, 0.95))
 
+	# V12: off-duty glyphs, shift-change text, called-guard indicator
+	_draw_v12_overlays()
+
+
+# ── Sprite-sheet rendering ────────────────────────────────────────────────────
+const _ESPR_TEX_PATH := {
+	"GUARD":    "res://sprites/enemy_guard.png",
+	"CAPTAIN":  "res://sprites/enemy_captain.png",
+	"BOSS":     "res://sprites/enemy_boss.png",
+	"SKELETON": "res://sprites/enemy_skeleton.png",
+	"GOBLIN":   "res://sprites/enemy_goblin.png",
+	"GNOLL":    "res://sprites/enemy_gnoll.png",
+}
+static var _espr_tex_cache := {}
+const _ESPR_CW := 32
+const _ESPR_CH := 40
+const _ESPR_BASE_SCALE := 0.62
+const _ESPR_FOOT_CELL_Y := 38.0
+const _ESPR_FOOT_WORLD_Y := 4.0
+# Per-archetype scale multiplier (imposing bosses, hunched goblins, etc.)
+const _ESPR_TYPE_SCALE := {
+	"GUARD": 1.0, "CAPTAIN": 1.10, "BOSS": 1.28,
+	"SKELETON": 1.0, "GOBLIN": 0.84, "GNOLL": 1.14,
+}
+
+func _espr_key() -> String:
+	if is_boss:    return "BOSS"
+	if is_captain: return "CAPTAIN"
+	match enemy_type:
+		EnemyType.SKELETON: return "SKELETON"
+		EnemyType.GOBLIN:   return "GOBLIN"
+		EnemyType.GNOLL:    return "GNOLL"
+		_:                  return "GUARD"
+
+func _espr_tex(key: String) -> Texture2D:
+	var path: String = _ESPR_TEX_PATH.get(key, _ESPR_TEX_PATH["GUARD"])
+	if _espr_tex_cache.has(path):
+		return _espr_tex_cache[path]
+	var tex: Texture2D = load(path) if ResourceLoader.exists(path) else null
+	_espr_tex_cache[path] = tex
+	return tex
+
+func _espr_row(f: Vector2) -> int:
+	if abs(f.x) > abs(f.y):
+		return 2 if f.x > 0.0 else 1   # RIGHT / LEFT
+	return 3 if f.y < 0.0 else 0       # UP / DOWN
 
 func _draw_guard_svg(f: Vector2, perp: Vector2):
-	match enemy_type:
-		EnemyType.HUMAN:    _draw_human_svg(f, perp)
-		EnemyType.SKELETON: _draw_skeleton_svg(f, perp)
-		EnemyType.GOBLIN:   _draw_goblin_svg(f, perp)
-		EnemyType.GNOLL:    _draw_gnoll_svg(f, perp)
-		_:                  _draw_human_svg(f, perp)
+	var key: String = _espr_key()
+	var tex: Texture2D = _espr_tex(key)
+	if tex == null:
+		match enemy_type:
+			EnemyType.SKELETON: _draw_skeleton_svg(f, perp)
+			EnemyType.GOBLIN:   _draw_goblin_svg(f, perp)
+			EnemyType.GNOLL:    _draw_gnoll_svg(f, perp)
+			_:                  _draw_human_svg(f, perp)
+		return
+
+	var scale: float = _ESPR_BASE_SCALE * float(_ESPR_TYPE_SCALE.get(key, 1.0))
+	var moving: bool = move_timer <= 0.04 or alert_state == AlertState.ALERT
+	var col: int = (int(_anim_t * 8.0) % 4) if moving else 0
+	var row: int = _espr_row(f)
+	var src := Rect2(col * _ESPR_CW, row * _ESPR_CH, _ESPR_CW, _ESPR_CH)
+	var sz: Vector2 = Vector2(_ESPR_CW, _ESPR_CH) * scale
+
+	# Ground shadow under the feet
+	draw_set_transform(Vector2(1.0, _ESPR_FOOT_WORLD_Y + 1.0), 0.0, Vector2(1.0, 0.40))
+	draw_circle(Vector2.ZERO, 7.0 * scale * 1.4, Color(0.0, 0.0, 0.0, 0.32))
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+	var top_left := Vector2(-sz.x * 0.5, _ESPR_FOOT_WORLD_Y - _ESPR_FOOT_CELL_Y * scale)
+	var mod := Color(1, 1, 1, 1)
+	if alert_state == AlertState.ALERT:
+		mod = Color(1.0, 0.88, 0.84)   # faint warm flush when hunting
+	draw_texture_rect_region(tex, Rect2(top_left, sz), src, mod)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED ART HELPERS — isometric 3/4 perspective primitives
@@ -1268,6 +1682,9 @@ func _draw_human_svg(f: Vector2, perp2: Vector2):
 	# 8. Helmet
 	var head_c: Vector2 = Vector2(0, -10.5 * sc) + Vector2(0, bob * 0.5)
 	_draw_human_helmet(head_c, f, perp2, sc, tabard_col)
+	# Warm torch rim-light catching the helmet's upper-left edge
+	draw_arc(head_c, 3.4 * sc, PI * 0.80, PI * 1.40, 9,
+		Color(1.0, 0.82, 0.55, 0.38), 0.8 * sc)
 
 	# 9. Spear in front hand
 	_draw_spear(hand_r, f, perp2, sc)
@@ -2492,3 +2909,180 @@ func _is_blocked(target_pos: Vector2) -> bool:
 	query.position = target_pos
 	query.exclude = [self]
 	return space.intersect_point(query).size() > 0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V12 ADDITIONS — Off-duty states, guard communication, formation search,
+#                 evidence detection, shift change
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Off-duty state ─────────────────────────────────────────────────────────────
+enum OffDutyState { NONE, EATING, SLEEPING, GAMBLING }
+var off_duty_state: OffDutyState = OffDutyState.NONE
+
+# Base vision/detection values before off-duty modifier — set in _ready
+var _base_vision_range: float = 0.0
+var _base_detect_fill_unaware: float = 0.0
+var _base_detect_fill_suspicious: float = 0.0
+
+# ── Formation search ──────────────────────────────────────────────────────────
+var _search_pattern: Array[Vector2] = []
+var _search_idx: int = 0
+
+# ── Evidence scan ─────────────────────────────────────────────────────────────
+var _env_scan_t: float = 0.0
+const _ENV_SCAN_INTERVAL: float = 3.0
+var _seen_open_doors: Array = []       # track doors we saw open ourselves
+
+# ── Shift change (V12 extended) ───────────────────────────────────────────────
+var _shift_change_t: float = 0.0       # V12 shift change countdown (separate from existing _shift_timer)
+var _shift_change_popup_t: float = 0.0
+
+# ── Called-guard color flag ───────────────────────────────────────────────────
+var _was_called: bool = false          # true when alerted by another guard's call
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V12: Off-duty setter
+# ─────────────────────────────────────────────────────────────────────────────
+func set_off_duty(state: OffDutyState) -> void:
+	off_duty_state = state
+	# Restore base values first
+	vision_range                          = _base_vision_range
+	detect_fill_rate[AlertState.UNAWARE]  = _base_detect_fill_unaware
+	detect_fill_rate[AlertState.SUSPICIOUS] = _base_detect_fill_suspicious
+
+	match state:
+		OffDutyState.NONE:
+			pass  # restored above
+		OffDutyState.EATING:
+			vision_range                         *= 0.6
+			detect_fill_rate[AlertState.UNAWARE] *= 0.5
+		OffDutyState.GAMBLING:
+			vision_range                         *= 0.6
+			detect_fill_rate[AlertState.UNAWARE] *= 0.5
+		OffDutyState.SLEEPING:
+			vision_range = 0.0   # blind
+			detect_fill_rate[AlertState.UNAWARE]     = 999.0  # effectively never triggers
+			detect_fill_rate[AlertState.SUSPICIOUS]  = 999.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V12: Guard communication — call nearby guards on alert
+# ─────────────────────────────────────────────────────────────────────────────
+func _call_nearby_guards(radius: float) -> void:
+	var alarm_pos: Vector2 = player.global_position if player else global_position
+	for g in get_tree().get_nodes_in_group("guards"):
+		if g == self or not is_instance_valid(g):
+			continue
+		if global_position.distance_to(g.global_position) > radius:
+			continue
+		if g.get("alert_state") == AlertState.ALERT:
+			continue
+		g.set("_was_called", true)
+		g.set("investigate_pos", alarm_pos)
+		if g.has_method("_become_suspicious"):
+			g._become_suspicious(alarm_pos)
+		if g.has_method("_popup"):
+			g._popup("CALLED!", Color(1.0, 0.55, 0.0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V12: Formation search pattern
+# ─────────────────────────────────────────────────────────────────────────────
+func _build_search_pattern(center: Vector2) -> void:
+	_search_pattern.clear()
+	_search_idx = 0
+	_search_pattern.append(center)
+	# Cardinal offsets at 32px
+	_search_pattern.append(center + Vector2(32, 0))
+	_search_pattern.append(center + Vector2(-32, 0))
+	_search_pattern.append(center + Vector2(0, 32))
+	_search_pattern.append(center + Vector2(0, -32))
+	# Diagonal offsets at ~45px (32*sqrt2/sqrt2 ≈ 45)
+	_search_pattern.append(center + Vector2(45, 45))
+	_search_pattern.append(center + Vector2(-45, 45))
+	_search_pattern.append(center + Vector2(45, -45))
+	_search_pattern.append(center + Vector2(-45, -45))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V12: Environment scan — open doors, extinguished torches
+# ─────────────────────────────────────────────────────────────────────────────
+func _scan_environment() -> void:
+	if player != null and _can_see_player:
+		return  # already reacting to player
+	if alert_state != AlertState.UNAWARE:
+		return
+
+	# Check nearby LockedDoor nodes
+	for door in get_tree().get_nodes_in_group("interactable"):
+		if not is_instance_valid(door):
+			continue
+		if global_position.distance_to(door.global_position) > 80.0:
+			continue
+		# Door that was locked and is now open — and we didn't watch it open
+		var was_locked: bool = door.get("_was_locked_initially") == true or \
+							   door.get("is_locked") == false
+		var is_open: bool = door.get("is_open") == true or door.get("_is_open") == true
+		if is_open and not (door in _seen_open_doors):
+			_seen_open_doors.append(door)
+			_become_suspicious(door.global_position)
+			_popup("Door?!", Color(1.0, 0.85, 0.25))
+			return
+
+	# Check nearby torches — recently extinguished
+	for torch in get_tree().get_nodes_in_group("torches"):
+		if not is_instance_valid(torch):
+			continue
+		if global_position.distance_to(torch.global_position) > 64.0:
+			continue
+		var is_lit: bool = torch.get("is_lit") != false  # default true if missing
+		if not is_lit:
+			# Check if this torch was lit the last time we checked
+			var meta_key := "v12_torch_lit_%d" % torch.get_instance_id()
+			if get_meta(meta_key, true) == true:
+				set_meta(meta_key, false)
+				_become_suspicious(torch.global_position)
+				_popup("...dark?", Color(0.85, 0.75, 0.30))
+				return
+		else:
+			# Torch is lit — update our memory
+			var meta_key := "v12_torch_lit_%d" % torch.get_instance_id()
+			set_meta(meta_key, true)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V12 draw additions — called from _draw after base drawing
+# ─────────────────────────────────────────────────────────────────────────────
+func _draw_v12_overlays() -> void:
+	var font := ThemeDB.fallback_font
+
+	# Off-duty glyphs
+	match off_duty_state:
+		OffDutyState.SLEEPING:
+			# Darker tint overlay
+			draw_rect(Rect2(-9, -20, 18, 22), Color(0.05, 0.05, 0.20, 0.35))
+			# "Zzz" floating text (animated upward drift)
+			var zzz_off := Vector2(7.0, -20.0 - fmod(_anim_t * 4.0, 10.0))
+			draw_string(font, zzz_off, "Zzz",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(0.70, 0.80, 1.0, 0.80))
+		OffDutyState.GAMBLING:
+			# Playing card glyph above head
+			draw_string(font, Vector2(-4, -24), "♠",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.95, 0.90, 0.80, 0.85))
+		OffDutyState.EATING:
+			# Food bowl glyph
+			draw_string(font, Vector2(-4, -24), "🍲",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(0.90, 0.70, 0.30, 0.85))
+
+	# Shift change popup flash
+	if _shift_change_popup_t > 0.0:
+		var alpha: float = minf(1.0, _shift_change_popup_t / 1.5)
+		draw_string(font, Vector2(-20, -34), "SHIFT CHANGE",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.85, 0.85, 0.50, alpha))
+
+	# Called-guard indicator (orange investigate cone tint — handled via cone color override elsewhere)
+	# Show small orange chevron if was called
+	if _was_called and alert_state == AlertState.SUSPICIOUS:
+		draw_string(font, Vector2(-4, -28), "►",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 8, Color(1.0, 0.55, 0.10, 0.85))

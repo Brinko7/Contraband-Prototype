@@ -16,9 +16,18 @@ const _locked_door_script := preload("res://LockedDoor.gd")
 const _curtain_script     := preload("res://CurtainSpot.gd")
 const _fog_script        := preload("res://FogOfWar.gd")
 const _bell_script       := preload("res://AlarmBell.gd")
+const _RoomManagerScript := preload("res://RoomManager.gd")
+const _RoomDataScript    := preload("res://RoomData.gd")
+const _Floorplans        := preload("res://Floorplans.gd")
 
 var _rng := RandomNumberGenerator.new()
 var _reinforcements_spawned := 0
+
+# Active building for this floor. Index 0 = CLASSIC (hand-authored encounters);
+# 1+ = procedural plans populated generically. Selected to match LevelMap.
+var _plan_idx: int = 0
+var _plan: Dictionary = {}
+func _is_classic() -> bool: return _plan_idx == 0
 
 # ── Map coordinate reference (48×36 tiles, 16 px/tile = 768×576) ─────────────
 # Vault          : x 128-640, y 16-96    (cols  8-39, rows  1-6)
@@ -40,7 +49,11 @@ func _ready():
 	GameManager.alert_triggered.connect(_on_alert_triggered)
 	_rng.seed = GameManager.run_seed + GameManager.current_floor * 7919
 
-	# Entry spawn position — varies by preheist entry selection
+	# Pick the same building LevelMap picked (deterministic on seed + floor).
+	_plan_idx = _Floorplans.pick(GameManager.run_seed, GameManager.current_floor)
+	_plan = _Floorplans.get_plan(_plan_idx)
+
+	# Entry spawn position — varies by preheist entry selection (CLASSIC only).
 	const ENTRY_SPAWNS: Dictionary = {
 		"FRONT_DOOR":  Vector2(384, 536), "SIDE_WINDOW": Vector2(560, 400),
 		"SEWER":       Vector2(200, 450), "GUARD_POST":  Vector2(384, 536),
@@ -52,6 +65,9 @@ func _ready():
 		"PHANTOM":     Vector2(150, 380),
 	}
 	var spawn_pos: Vector2 = ENTRY_SPAWNS.get(GameManager.preheist_entry, Vector2(384, 512))
+	# New floorplans: spawn in the plan's entry room (toward its near edge).
+	if not _is_classic():
+		spawn_pos = _entry_spawn_pos()
 	var player_node := get_tree().get_first_node_in_group("player")
 	if player_node:
 		player_node.position = spawn_pos
@@ -111,51 +127,88 @@ func _ready():
 			guard.set("show_stats", true)
 	# entry_map intel: FogOfWar._reveal_entry_room() handles this via call_deferred
 
-	var variant: int = _rng.randi() % 3
-	match GameManager.current_floor:
-		1:
-			if variant == 0:   _setup_floor1()
-			elif variant == 1: _setup_floor1b()
-			else:              _setup_floor1c()
-		2:
-			if variant == 0:   _setup_floor2()
-			elif variant == 1: _setup_floor2b()
-			else:              _setup_floor2c()
-		3:
-			if variant == 0:   _setup_floor3()
-			elif variant == 1: _setup_floor3b()
-			else:              _setup_floor3c()
-		4:
-			if variant == 0:   _setup_floor4()
-			elif variant == 1: _setup_floor4b()
-			else:              _setup_floor4c()
-		5:
-			if variant == 0:   _setup_floor5()
-			elif variant == 1: _setup_floor5b()
-			else:              _setup_floor5c()
-		_:
-			if variant == 0:   _setup_floor6()
-			elif variant == 1: _setup_floor6b()
-			else:              _setup_floor6c()
+	if _is_classic():
+		var variant: int = _rng.randi() % 3
+		match GameManager.current_floor:
+			1:
+				if variant == 0:   _setup_floor1()
+				elif variant == 1: _setup_floor1b()
+				else:              _setup_floor1c()
+			2:
+				if variant == 0:   _setup_floor2()
+				elif variant == 1: _setup_floor2b()
+				else:              _setup_floor2c()
+			3:
+				if variant == 0:   _setup_floor3()
+				elif variant == 1: _setup_floor3b()
+				else:              _setup_floor3c()
+			4:
+				if variant == 0:   _setup_floor4()
+				elif variant == 1: _setup_floor4b()
+				else:              _setup_floor4c()
+			5:
+				if variant == 0:   _setup_floor5()
+				elif variant == 1: _setup_floor5b()
+				else:              _setup_floor5c()
+			_:
+				if variant == 0:   _setup_floor6()
+				elif variant == 1: _setup_floor6b()
+				else:              _setup_floor6c()
 
-	# Optional side passage — 50% chance, adds a locked side room with elite guard + bonus loot
-	if _rng.randi() % 2 == 0:
-		_spawn_side_passage()
+		# Optional side passage — 50% chance, adds a locked side room with elite guard + bonus loot
+		if _rng.randi() % 2 == 0:
+			_spawn_side_passage()
 
-	# Locked door — Antechamber → Vault corridor (cols 26-27, rows 6-7), requires captain's key
-	_locked_door(Vector2(432, 112), 1)
+		# Locked door — Antechamber → Vault corridor (cols 26-27, rows 6-7), requires captain's key
+		_locked_door(Vector2(432, 112), 1)
+	else:
+		# Procedural building: populate guards/loot/traps from the plan's rooms.
+		_populate_generic()
+		_position_exit()
 
 	_spawn_interactables()
+	# V15: PITCH_BLACK complication — extinguish all torches at start
+	if GameManager.floor_complication == "PITCH_BLACK":
+		call_deferred("_extinguish_all_torches")
 	_spawn_floor_relic()
 	_ensure_safe_spawn()
 	_apply_wanted_level_effects()
-	_spawn_archetype_guards()
+	if _is_classic():
+		_spawn_archetype_guards()
+
+	# ── V12 Room Identity System ──────────────────────────────────────────────
+	_register_rooms()
+	if _is_classic():
+		_spawn_secret_room()
+		_spawn_rumor_intel()
+
+	# ── V12 Narrative + Combat + Evidence systems ─────────────────────────────
+	_spawn_v12_systems()
+
+	# ── V13 World Population (CLASSIC-only props; new plans stay lean) ─────────
+	if _is_classic():
+		_spawn_v13_props()
+		_spawn_offduty_npcs()
+		_spawn_ambient_details()
+	_spawn_contextual_hints()
 
 	# Fog-of-war overlay — high z_index keeps it above all game nodes regardless of Y sort
 	var fog := Node2D.new()
 	fog.set_script(_fog_script)
 	fog.z_index = 100
 	add_child(fog)
+
+	# ── Cinematic lighting overlay — screen-space vignette + per-floor grade.
+	# CanvasLayer 0 sits above the world (default canvas) but below the HUD (layer 1).
+	var light_layer := CanvasLayer.new()
+	light_layer.layer = 0
+	add_child(light_layer)
+	var lighting := Control.new()
+	lighting.set_script(preload("res://LightingOverlay.gd"))
+	light_layer.add_child(lighting)
+
+	# ── V14: Floor title card ─────────────────────────────────────────────────
+	_spawn_floor_title_card()
 
 # ── Returns base ± jitter snapped to 16-px grid ───────────────────────────────
 func _j(base: Vector2, rx: int = 1, ry: int = 1) -> Vector2:
@@ -183,14 +236,22 @@ func _apply_wanted_level_effects():
 			if g.is_in_group("guards"):
 				var iv: float = g.get("move_interval") if g.get("move_interval") else 0.40
 				g.set("move_interval", iv * max(0.60, 1.0 - wl * 0.06))
-	# Wanted 3+: spawn one extra patrol guard at a random entry point
+	# Wanted 3+: spawn one extra patrol guard near the entry
 	if wl >= 3:
-		var entry_points := [Vector2(272, 512), Vector2(496, 512), Vector2(384, 512)]
-		var ep: Vector2 = entry_points[_rng.randi() % entry_points.size()]
-		_prowler(_j(ep), [_j(Vector2(256,512)), _j(Vector2(512,512))])
+		if _is_classic():
+			var entry_points := [Vector2(272, 512), Vector2(496, 512), Vector2(384, 512)]
+			var ep: Vector2 = entry_points[_rng.randi() % entry_points.size()]
+			_prowler(_j(ep), [_j(Vector2(256,512)), _j(Vector2(512,512))])
+		else:
+			var ec := _entry_spawn_pos()
+			_prowler(ec, [ec + Vector2(-48, 0), ec + Vector2(48, 0)])
 	# Wanted 4+: spawn an extra hound
 	if wl >= 4:
-		_hound(_j(Vector2(384, 500)), [_j(Vector2(256,500)), _j(Vector2(512,500))])
+		if _is_classic():
+			_hound(_j(Vector2(384, 500)), [_j(Vector2(256,500)), _j(Vector2(512,500))])
+		else:
+			var hc := _entry_spawn_pos()
+			_hound(hc, [hc + Vector2(-48, 0), hc + Vector2(48, 0)])
 	# Wanted 5: all guards start SUSPICIOUS
 	if wl >= 5:
 		for g in get_children():
@@ -206,6 +267,9 @@ func _escalated(level: int) -> bool: return GameManager.alert_escalation >= leve
 
 # ── Shared interactables (torches and barrel hiding-spots) ────────────────────
 func _spawn_interactables():
+	if not _is_classic():
+		_spawn_interactables_generic()
+		return
 	# Match LevelMap.TORCHES exactly
 	for tp in [Vector2(256,20), Vector2(384,20), Vector2(512,20),
 			   Vector2(144,132), Vector2(456,132), Vector2(680,132),
@@ -1662,8 +1726,11 @@ func _spawn_floor_relic() -> void:
 	# Pick from lowest-rarity available with some randomness
 	var eligible: Array = pool.filter(func(x): return x.rarity == pool[0].rarity)
 	var chosen: Dictionary = eligible[_rng.randi() % eligible.size()]
-	# Spawn at vault loot alcove (always in accessible area)
+	# Spawn in the vault — classic uses its hand-placed alcove; new plans use the
+	# plan's vault-room centre (always carved, always reachable).
 	var pos := Vector2(192.0 + _rng.randi_range(0, 3) * 16.0, 48.0)
+	if not _is_classic():
+		pos = _vault_center()
 	_spawn_relic(pos, chosen.id)
 
 # ── V10 New guard archetype helpers ────────────────────────────────────────
@@ -1764,3 +1831,687 @@ func _locked_door(pos: Vector2, did: int) -> Node:
 	d.set("door_id", did)
 	add_child(d)
 	return d
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Procedural floorplans — generic population for non-CLASSIC buildings
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Pixel centre of a plan room by index.
+func _room_center(idx: int) -> Vector2:
+	var rooms: Array = _plan.get("rooms", [])
+	if idx < 0 or idx >= rooms.size():
+		return Vector2(384, 288)
+	return _Floorplans.room_center(rooms[idx]["rect"])
+
+func _vault_center() -> Vector2:
+	return _room_center(int(_plan.get("vault_idx", 0)))
+
+# Spawn point inside the entry room, biased toward its far (lower) edge.
+func _entry_spawn_pos() -> Vector2:
+	var rooms: Array = _plan.get("rooms", [])
+	var ei: int = int(_plan.get("entry_idx", 0))
+	if ei < 0 or ei >= rooms.size():
+		return Vector2(384, 480)
+	var wr: Rect2 = _Floorplans.room_world_rect(rooms[ei]["rect"])
+	return Vector2(wr.position.x + wr.size.x * 0.5, wr.position.y + wr.size.y - 24.0)
+
+# A 4-corner perimeter patrol loop inside a plan room (pixel waypoints).
+func _room_patrol(idx: int) -> Array:
+	var rooms: Array = _plan.get("rooms", [])
+	if idx < 0 or idx >= rooms.size():
+		return []
+	return _Floorplans.perimeter_patrol(rooms[idx]["rect"], 24.0)
+
+# Move the statically-placed Exit node into the plan's entry room.
+func _position_exit() -> void:
+	var ex = get_node_or_null("Exit")
+	if ex == null:
+		ex = get_tree().get_first_node_in_group("exits")
+	if ex != null:
+		var ep := _entry_spawn_pos()
+		(ex as Node2D).position = Vector2(ep.x, ep.y - 8.0)
+
+# Torches from the plan + a hiding barrel (and curtain) tucked into each room.
+func _spawn_interactables_generic() -> void:
+	for tp: Vector2 in _plan.get("torches", []):
+		var tn := Node2D.new()
+		tn.set_script(_torch_script)
+		tn.position = tp
+		add_child(tn)
+	var ei: int = int(_plan.get("entry_idx", 0))
+	var rooms: Array = _plan.get("rooms", [])
+	for i in range(rooms.size()):
+		if i == ei:
+			continue
+		var wr: Rect2 = _Floorplans.room_world_rect(rooms[i]["rect"])
+		var hs := Node2D.new()
+		hs.set_script(_hiding_script)
+		hs.position = Vector2(wr.position.x + 24.0, wr.position.y + 24.0)
+		add_child(hs)
+		if wr.size.x >= 160.0:
+			_curtain(Vector2(wr.position.x + wr.size.x - 24.0, wr.position.y + 24.0))
+
+# Register plan rooms with the RoomManager so flavour popups + clearing work.
+func _register_rooms_generic() -> void:
+	var rm = _RoomManagerScript.new()
+	rm.name = "RoomManager"
+	add_child(rm)
+	var vi: int = int(_plan.get("vault_idx", 0))
+	var ei: int = int(_plan.get("entry_idx", 0))
+	var rooms: Array = _plan.get("rooms", [])
+	for i in range(rooms.size()):
+		var rt = _RoomDataScript.RoomType.STOREROOM
+		if i == vi:
+			rt = _RoomDataScript.RoomType.VAULT
+		elif i == ei:
+			rt = _RoomDataScript.RoomType.ENTRY_FOYER
+		elif rooms[i].get("kind", "") == "guard":
+			rt = _RoomDataScript.RoomType.BARRACKS
+		elif rooms[i].get("kind", "") == "hall":
+			rt = _RoomDataScript.RoomType.ANTECHAMBER
+		rm.register_room(_RoomDataScript.make(rt, rooms[i]["rect"]))
+
+# The heart of procedural floors: guards, loot, weapon, traps — scaled by depth.
+func _populate_generic() -> void:
+	var floor_n: int = GameManager.current_floor
+	var rooms: Array = _plan.get("rooms", [])
+	var ei: int = int(_plan.get("entry_idx", 0))
+	var vi: int = int(_plan.get("vault_idx", 0))
+
+	# ── Guards: one per non-entry room; vault + deep floors get reinforced ────
+	for i in range(rooms.size()):
+		if i == ei:
+			continue
+		var patrol := _room_patrol(i)
+		if patrol.is_empty():
+			continue
+		var start: Vector2 = patrol[0]
+		var kind: String = rooms[i].get("kind", "store")
+		var is_vault := (i == vi)
+		var vr := 95.0 + floor_n * 4.0
+		var va := 80.0
+		var spd := 0.42 + (0.04 if is_vault else 0.0)
+		if is_vault and floor_n >= 4:
+			_inquisitor(start, patrol)
+		elif kind == "guard" and floor_n >= 4:
+			_brute(start, patrol)
+		elif kind == "hall" and floor_n >= 5:
+			_hex_caster(start, [patrol[0], patrol[2]])
+		else:
+			_guard(start, patrol, ("WATCHER" if is_vault else "SENTRY"), vr, va, spd)
+		if is_vault and floor_n >= 3:
+			_guard(patrol[2], patrol, "WATCHER", vr, va, 0.85)
+
+	# A roaming hound on the hall from floor 3.
+	if floor_n >= 3:
+		for i in range(rooms.size()):
+			if rooms[i].get("kind", "") == "hall":
+				var hp := _room_patrol(i)
+				if not hp.is_empty():
+					_hound(hp[0], hp)
+				break
+
+	# ── Loot: the main haul in the vault (enables the exit), bonus elsewhere ──
+	_loot(_vault_center(), 250 + floor_n * 130, false, mini(floor_n - 1, 2))
+	var loot_rooms: Array = []
+	for i in range(rooms.size()):
+		if i != ei and i != vi:
+			loot_rooms.append(i)
+	loot_rooms.shuffle()
+	for j in range(min(2, loot_rooms.size())):
+		_loot(_room_center(loot_rooms[j]), 90 + floor_n * 45, true, 0)
+
+	# ── Weapon pickup in a mid room ───────────────────────────────────────────
+	var wdrops := GameManager.get_floor_weapon_drops(floor_n)
+	if wdrops.size() >= 1:
+		var wr_idx: int = loot_rooms[0] if not loot_rooms.is_empty() else vi
+		_spawn_weapon_pickup(wdrops[0], _room_center(wr_idx) + Vector2(0, 28))
+
+	# ── Traps on deeper floors, set in room interiors ─────────────────────────
+	if floor_n >= 3 and not loot_rooms.is_empty():
+		_trap(_room_center(loot_rooms[0]) + Vector2(-24, 24))
+	if floor_n >= 5 and loot_rooms.size() >= 2:
+		_trap(_room_center(loot_rooms[1]) + Vector2(24, -24))
+
+	# ── A pickup item near the entry so the player starts with an option ──────
+	_pickup(_entry_spawn_pos() + Vector2(0, -20), _rng.randi() % 3)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V12 — Room Identity System
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Create and register RoomData for every standard room on this floor ────────
+func _register_rooms() -> void:
+	if not _is_classic():
+		_register_rooms_generic()
+		return
+	var rm = _RoomManagerScript.new()
+	rm.name = "RoomManager"
+	add_child(rm)
+
+	# Tile rects match LevelMap._build_map() carve calls exactly.
+	# Rect2i(col_start, row_start, width, height) — all in tile units.
+
+	# The Iron Vault — cols 6-41, rows 1-6
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.VAULT,
+		Rect2i(6, 1, 36, 6)))
+
+	# Commander's Quarters — cols 1-16, rows 8-17
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.CAPTAINS_OFFICE,
+		Rect2i(1, 8, 16, 10)))
+
+	# The Antechamber — cols 19-31, rows 8-17
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.ANTECHAMBER,
+		Rect2i(19, 8, 13, 10)))
+
+	# The Armory — cols 35-45, rows 8-17
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.ARMORY,
+		Rect2i(35, 8, 11, 10)))
+
+	# Guard Barracks — cols 1-19, rows 19-28
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.BARRACKS,
+		Rect2i(1, 19, 19, 10)))
+
+	# The Storeroom — cols 27-45, rows 19-28
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.STOREROOM,
+		Rect2i(27, 19, 19, 10)))
+
+	# Entry Foyer — cols 11-36, rows 30-34
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.ENTRY_FOYER,
+		Rect2i(11, 30, 26, 5)))
+
+	# Floor variant: kitchens replace part of the storeroom on floors 2 and 4
+	if GameManager.current_floor == 2 or GameManager.current_floor == 4:
+		_spawn_kitchen(rm)
+
+# ── Secret chamber — 30% chance, tucked in the gap between Barracks/Storeroom ─
+func _spawn_secret_room() -> void:
+	# Roll against a deterministic seed so the same run_seed + floor always agrees
+	if _rng.randi() % 10 >= 3:   # ~30% chance (0,1,2 = secret; 3-9 = no secret)
+		return
+
+	# Register the RoomData so the flavor popup fires on discovery
+	var rm = get_node_or_null("RoomManager")
+	if rm != null:
+		var secret_data := _RoomDataScript.make(_RoomDataScript.RoomType.SECRET_CHAMBER,
+			Rect2i(19, 19, 8, 10))   # gap cols 19-26, rows 19-28
+		rm.register_room(secret_data)
+
+	# ── Secret door hiding-spot in the shared wall ────────────────────────────
+	# Place it mid-wall between the Barracks east edge (col 19) and
+	# Storeroom west edge (col 27), around the vertical midpoint of the rows.
+	var door_pos := _j(Vector2(304, 376), 1, 2)   # cols ~19, rows ~23 in world px
+	var hs := Node2D.new()
+	hs.set_script(_hiding_script)
+	hs.position = door_pos
+	hs.set("is_secret_door", true)   # HidingSpot reads this to draw differently
+	add_child(hs)
+
+	# ── Trap at the entrance — secret rooms are unguarded but booby-trapped ───
+	_trap(_j(Vector2(320, 376), 1, 1))
+
+	# ── High-value loot — scales with floor ───────────────────────────────────
+	var loot_base: int = 400 + GameManager.current_floor * 150
+	var secret_centre := Vector2(336, 376)   # approximate centre of the gap
+	_loot(_j(secret_centre, 2, 1), loot_base,       true,  mini(GameManager.current_floor, 2))
+	_loot(_j(secret_centre, 2, 1), loot_base + 100, false, mini(GameManager.current_floor, 2))
+	_loot(_j(secret_centre, 2, 1), loot_base - 50,  true,  1)
+
+	# ── Rare pickup — a weapon drop from the current floor's loot table ───────
+	var wdrops := GameManager.get_floor_weapon_drops(GameManager.current_floor)
+	if wdrops.size() > 0:
+		_spawn_weapon_pickup(wdrops[0], _j(secret_centre, 2, 1))
+
+# ── Rumor intel — generate 2 flavor rumors for the floor ─────────────────────
+func _spawn_rumor_intel() -> void:
+	const RUMOR_POOL: Array[String] = [
+		"Guards are rotating shifts early tonight.",
+		"The vault ward has been glitching.",
+		"Someone spotted a rival thief on this floor.",
+		"The captain is entertaining a guest — distracted.",
+		"Extra reinforcements were called in.",
+		"One of the guards has been bribed by someone else already.",
+		"There's a secret passage the staff use.",
+		"The locksmith's tools were left in the storeroom.",
+		"A prisoner in the cells knows the vault combination.",
+		"The trophy room lights are being repaired — it's dark.",
+	]
+
+	# Use the floor RNG so rumors are deterministic for the same seed
+	var pool_copy: Array[String] = RUMOR_POOL.duplicate()
+	# Fisher-Yates shuffle limited to 2 picks
+	var rumors: Array[String] = []
+	for _i in range(2):
+		var idx: int = _rng.randi() % pool_copy.size()
+		rumors.append(pool_copy[idx])
+		pool_copy.remove_at(idx)
+
+	# Store on GameManager for the HUD to display pre-heist
+	GameManager.set("floor_rumors", rumors)
+
+# ── Kitchen variant — floors 2 and 4 get a kitchen in the storeroom area ─────
+func _spawn_kitchen(rm) -> void:
+	# The kitchen occupies the south-west corner of the storeroom area.
+	# We register it as a sub-room so the flavor popup fires on entry.
+	rm.register_room(_RoomDataScript.make(_RoomDataScript.RoomType.KITCHEN,
+		Rect2i(27, 23, 9, 6)))   # cols 27-35, rows 23-28 (lower storeroom corner)
+
+	# Two kitchen workers on simple patrol loops around the prep area
+	_civilian(_j(Vector2(480, 408), 1, 1),
+		[_j(Vector2(464, 392), 1, 0), _j(Vector2(544, 392), 1, 0),
+		 _j(Vector2(544, 432), 1, 0), _j(Vector2(464, 432), 1, 0)])
+	_civilian(_j(Vector2(528, 392), 1, 1),
+		[_j(Vector2(480, 376), 1, 0), _j(Vector2(560, 376), 1, 0)])
+
+	# Oil slick near the stove — flammable kitchen grease
+	_oil(_j(Vector2(496, 416), 1, 0))
+
+	# The "stove" — a torch node placed as the fire source
+	var stove := Node2D.new()
+	stove.set_script(_torch_script)
+	stove.position = _j(Vector2(512, 400), 1, 0)
+	add_child(stove)
+
+# ── V12 Narrative + Combat + Evidence systems ─────────────────────────────────
+func _spawn_v12_systems() -> void:
+	# RunNarrative — generates heist story context and twist events
+	var narrative_script = load("res://RunNarrative.gd")
+	if narrative_script:
+		var narrative := Node.new()
+		narrative.set_script(narrative_script)
+		narrative.name = "RunNarrative"
+		add_child(narrative)
+		# Generate narrative for current floor
+		if narrative.has_method("generate"):
+			narrative.generate(GameManager.current_floor, _rng)
+		# Write target/hook to GameManager for HUD access
+		if GameManager.get("run_target_name") == "" and narrative.get("target_name") != "":
+			GameManager.set("run_target_name",     narrative.get("target_name"))
+			GameManager.set("run_target_location", narrative.get("target_location"))
+			GameManager.set("run_macguffin",       narrative.get("macguffin"))
+			GameManager.set("run_story_hook",      narrative.get("story_hook"))
+		# Wire twist notifications → HUD
+		if narrative.has_signal("twist_triggered"):
+			narrative.twist_triggered.connect(_on_narrative_twist)
+		# Show briefing dossier on floor 1 (or if GM signals it)
+		if GameManager.current_floor == 1 and GameManager.has_signal("show_briefing"):
+			GameManager.show_briefing.emit()
+
+	# CombatManager — positioning bonuses, finishing moves
+	var combat_script = load("res://CombatManager.gd")
+	if combat_script:
+		var cm := Node.new()
+		cm.set_script(combat_script)
+		cm.name = "CombatManager"
+		add_child(cm)
+
+	# EvidenceSystem — tracks player footprint and feeds ghost rating
+	var evidence_script = load("res://EvidenceSystem.gd")
+	if evidence_script:
+		var es := Node.new()
+		es.set_script(evidence_script)
+		es.name = "EvidenceSystem"
+		add_child(es)
+
+	# Spawn chandeliers in vault and captain's office
+	_spawn_chandelier(Vector2(256, 48))   # Vault left
+	_spawn_chandelier(Vector2(512, 48))   # Vault right
+	_spawn_chandelier(Vector2(144, 200))  # Captain's office
+
+# ── Chandelier spawn helper ───────────────────────────────────────────────────
+func _spawn_chandelier(pos: Vector2) -> void:
+	var chandelier_script = load("res://Chandelier.gd")
+	if not chandelier_script:
+		return
+	var c := Node2D.new()
+	c.set_script(chandelier_script)
+	c.position = pos
+	add_child(c)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V13 — World Population: shelves, poisonable food, off-duty guards
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── InteractableShelf and PoisonableFood placement ───────────────────────────
+func _spawn_v13_props() -> void:
+	var shelf_script = load("res://InteractableShelf.gd")
+	var food_script  = load("res://PoisonableFood.gd")
+	var vial_script  = load("res://PoisonVial.gd")
+	var fl := GameManager.current_floor
+
+	# ── Bookcases in Antechamber (library/intel area) ─────────────────────────
+	if shelf_script:
+		for pos in [Vector2(336, 148), Vector2(400, 148), Vector2(464, 148)]:
+			var s := Node2D.new()
+			s.set_script(shelf_script)
+			s.position = pos
+			s.set("shelf_type", 0)  # ShelfType.BOOKCASE = 0
+			add_child(s)
+
+	# ── Weapon rack in the Armory ─────────────────────────────────────────────
+	if shelf_script:
+		for pos in [Vector2(576, 148), Vector2(624, 148), Vector2(672, 148)]:
+			var s := Node2D.new()
+			s.set_script(shelf_script)
+			s.position = pos
+			s.set("shelf_type", 1)  # ShelfType.WEAPON_RACK = 1
+			add_child(s)
+
+	# ── Supply crates in Barracks ─────────────────────────────────────────────
+	if shelf_script:
+		for pos in [Vector2(64, 320), Vector2(256, 320)]:
+			var s := Node2D.new()
+			s.set_script(shelf_script)
+			s.position = pos
+			s.set("shelf_type", 2)  # ShelfType.SUPPLY_CRATE = 2
+			add_child(s)
+
+	# ── Trophy shelf in Captain's Office ──────────────────────────────────────
+	if shelf_script:
+		var ts := Node2D.new()
+		ts.set_script(shelf_script)
+		ts.position = Vector2(208, 144)
+		ts.set("shelf_type", 3)  # ShelfType.TROPHY_SHELF = 3
+		add_child(ts)
+
+	# ── Wine rack + supply crates in Storeroom ────────────────────────────────
+	if shelf_script:
+		for pos in [Vector2(448, 320), Vector2(512, 320), Vector2(576, 320)]:
+			var s := Node2D.new()
+			s.set_script(shelf_script)
+			s.position = pos
+			s.set("shelf_type", 4 if pos.x > 500 else 2)  # WINE_RACK / SUPPLY_CRATE
+			add_child(s)
+
+	# ── Room-themed contraband loot ───────────────────────────────────────────
+	# Vault: rare contraband item (very high value)
+	var contraband_items := [
+		["Stolen Crown", 800, true, 2],
+		["Noble Signet", 550, true, 2],
+		["Blood Diamond", 700, true, 2],
+		["Guild Ledger",  450, true, 1],
+	]
+	var vault_contraband: Array = contraband_items[fl % contraband_items.size()]
+	var vault_loot := _loot(_j(Vector2(384, 64), 2, 1),
+		vault_contraband[1] + fl * 80, vault_contraband[2], vault_contraband[3])
+	vault_loot.set("item_name",      vault_contraband[0])
+	vault_loot.set("is_contraband",  true)
+
+	# Captain's Office: intelligence item (medium value, bonus = false = visible)
+	if fl >= 2:
+		var intel_loot := _loot(_j(Vector2(160, 160), 1, 1), 200 + fl * 30, false, 1)
+		intel_loot.set("item_name", "Patrol Schedule")
+
+	# Armory: weapon upgrade token (bonus loot)
+	var armory_bonus := _loot(_j(Vector2(624, 160), 1, 1), 150 + fl * 25, true, 1)
+	armory_bonus.set("item_name", "Weapon Cache")
+
+	# ── Poison vial — hidden in storeroom, reachable via Investigation ────────
+	if vial_script and fl >= 1:
+		var v := Node2D.new()
+		v.set_script(vial_script)
+		v.position = Vector2(656, 352)
+		add_child(v)
+
+	# ── Poisonable food in Barracks (mess table) ─────────────────────────────
+	if food_script:
+		for pos in [Vector2(128, 400), Vector2(192, 400)]:
+			var f := Node2D.new()
+			f.set_script(food_script)
+			f.position = pos
+			f.set("food_type", 0)  # FoodType.GOBLET = 0
+			add_child(f)
+		# Barrel of ale
+		var barrel := Node2D.new()
+		barrel.set_script(food_script)
+		barrel.position = Vector2(240, 400)
+		barrel.set("food_type", 2)  # FoodType.BARREL = 2
+		add_child(barrel)
+
+	# ── Poisonable platter in Captain's Office (floor 2+ only) ───────────────
+	if food_script and fl >= 2:
+		var platter := Node2D.new()
+		platter.set_script(food_script)
+		platter.position = Vector2(160, 224)
+		platter.set("food_type", 1)  # FoodType.PLATTER = 1
+		add_child(platter)
+
+	# ── V14: Wanted Poster in Entry Foyer ────────────────────────────────────
+	var poster_script = load("res://WantedPoster.gd")
+	if poster_script:
+		var poster := Node2D.new()
+		poster.set_script(poster_script)
+		poster.position = Vector2(272, 480)   # left side of foyer, near entrance
+		add_child(poster)
+
+	# ── V15: Fence NPC in Storeroom (floor 2+) ────────────────────────────────
+	if fl >= 2:
+		var fence_script = load("res://FenceNPC.gd")
+		if fence_script:
+			var fence := Node2D.new()
+			fence.set_script(fence_script)
+			fence.position = _j(Vector2(704, 380), 0, 1)  # Storeroom SE corner
+			add_child(fence)
+
+# ── Off-duty soldiers in barracks + noble/merchant civilians ─────────────────
+func _spawn_offduty_npcs() -> void:
+	var fl := GameManager.current_floor
+	if fl < 1:
+		return
+
+	# ── Sleeping guards in Barracks (off-duty, not patrolling) ───────────────
+	# These wake up if noise or evidence is discovered nearby — big stealth challenge
+	var guard_script = load("res://Guard.gd")
+	if guard_script:
+		var sleep_positions := [Vector2(80, 400), Vector2(144, 400), Vector2(208, 400)]
+		# Floor scaling: more sleepers on harder floors
+		var sleeper_count := mini(1 + fl / 2, sleep_positions.size())
+		for i in range(sleeper_count):
+			var g := CharacterBody2D.new()
+			g.set_script(guard_script)
+			g.position = sleep_positions[i]
+			g.set("patrol_path", [sleep_positions[i]])  # stay in place
+			g.set("vision_range", 40.0)
+			g.set("alert_sensitivity", 0.3)  # hard to wake without noise
+			add_child(g)
+			# Set off-duty state once node is ready
+			g.call_deferred("set_off_duty", 2)  # OffDutyState.SLEEPING = 2
+
+	# ── Noble guest in Captain's Office (floor 2+) ────────────────────────────
+	if fl >= 2:
+		var noble := Node2D.new()
+		noble.set_script(_civilian_script)
+		noble.position = Vector2(176, 192)
+		noble.set("npc_type", 1)  # NPCType.NOBLE = 1
+		noble.set("patrol_path", [Vector2(128, 192), Vector2(224, 192),
+								   Vector2(224, 240), Vector2(128, 240)])
+		add_child(noble)
+
+	# ── Merchant in Antechamber (floor 3+) ────────────────────────────────────
+	if fl >= 3:
+		var merchant := Node2D.new()
+		merchant.set_script(_civilian_script)
+		merchant.position = Vector2(400, 192)
+		merchant.set("npc_type", 2)  # NPCType.MERCHANT = 2
+		merchant.set("patrol_path", [Vector2(336, 192), Vector2(464, 192)])
+		add_child(merchant)
+
+	# ── Prisoner in Dungeon Cell variant (floor 3+, 50% chance) ──────────────
+	if fl >= 3 and _rng.randi() % 2 == 0:
+		var prisoner := Node2D.new()
+		prisoner.set_script(_civilian_script)
+		prisoner.position = Vector2(80, 432)   # south barracks corner
+		prisoner.set("npc_type", 4)  # NPCType.PRISONER = 4
+		prisoner.set("patrol_path", [Vector2(80, 432)])  # caged, no patrol
+		add_child(prisoner)
+
+# ── Contextual hint system ────────────────────────────────────────────────────
+# ── Ambient detail nodes — decorative world dressing ─────────────────────────
+func _spawn_ambient_details() -> void:
+	var fl := GameManager.current_floor
+	var script := GDScript.new()
+	# Inline ambient node — draws a faint inscription/glyph on the wall
+	script.source_code = """extends Node2D
+var msg := \"\"
+var col := Color(0.35, 0.32, 0.28, 0.40)
+func _draw():
+	draw_string(ThemeDB.fallback_font, Vector2(-20, 0), msg,
+		HORIZONTAL_ALIGNMENT_LEFT, 40, 7, col)
+"""
+	# Wall inscriptions — flavour the rooms
+	const INSCRIPTIONS := [
+		"† NONE SHALL PASS †", "PAY YOUR DUES", "✦ DUST ✦",
+		"HERE LIES AMBITION", "WATCH YOUR STEP", "GOLD OR GRAVE",
+		"✝ KEEPERS GUILD ✝", "NO WITNESSES", "THE VAULT NEVER SLEEPS",
+	]
+	var inscrip_pos := [
+		Vector2(48, 280),   # Captain's west wall
+		Vector2(640, 160),  # Armory east wall
+		Vector2(48, 420),   # Barracks south-west
+		Vector2(640, 420),  # Storeroom east wall
+	]
+	var rng_idx: int = fl % INSCRIPTIONS.size()
+	for i in range(mini(2, inscrip_pos.size())):
+		var n := Node2D.new()
+		n.set_script(script)
+		n.position = inscrip_pos[(i + rng_idx) % inscrip_pos.size()]
+		n.set("msg", INSCRIPTIONS[(rng_idx + i * 3) % INSCRIPTIONS.size()])
+		add_child(n)
+
+func _spawn_contextual_hints() -> void:
+	var hints_script = load("res://ContextualHints.gd")
+	if not hints_script:
+		return
+	var hints := Node.new()
+	hints.set_script(hints_script)
+	hints.name = "ContextualHints"
+	add_child(hints)
+	# Wire EvidenceSystem → hints so "first_evidence" fires correctly
+	var es = get_node_or_null("EvidenceSystem")
+	if es and es.has_signal("evidence_discovered"):
+		es.evidence_discovered.connect(func(_e): hints.call("notify_evidence"))
+
+# ── Narrative twist handler — called when RunNarrative fires a twist ──────────
+func _on_narrative_twist(twist: Dictionary) -> void:
+	# Show the twist text to the player via DicePopup / RoomName banner
+	var player = get_tree().get_first_node_in_group("player")
+	var pos := Vector2(384, 300)
+	if player:
+		pos = (player as Node2D).global_position + Vector2(0, -48)
+
+	# Pop a DicePopup-style banner with the twist flavor text
+	var popup_scene = load("res://DicePopup.tscn")
+	if popup_scene:
+		var popup = popup_scene.instantiate()
+		if popup.has_method("setup"):
+			popup.call("setup", "⚡ " + twist.get("text", "Something changed..."),
+				Color(1.0, 0.75, 0.10))
+		popup.global_position = pos
+		add_child(popup)
+
+	# Also propagate heat increase to GameManager
+	var gm = get_node_or_null("/root/GameManager")
+	if gm and twist.get("id") == "REINFORCEMENTS":
+		if gm.get("alert_escalation") != null:
+			gm.set("alert_escalation", mini(gm.get("alert_escalation") + 2, 10))
+
+# ── V14: Floor title card — atmospheric location name fades in/out ────────────
+func _spawn_floor_title_card() -> void:
+	const FLOOR_NAMES := [
+		"",
+		"I — The Entry Hall",
+		"II — The Inner Sanctum",
+		"III — The Chancellor's Keep",
+		"IV — The Warden's Redoubt",
+		"V — The Throne Room",
+		"VI — The Citadel",
+	]
+	var fl := GameManager.current_floor
+	var title_text: String = FLOOR_NAMES[clampi(fl, 0, FLOOR_NAMES.size() - 1)]
+	if fl > FLOOR_NAMES.size() - 1:
+		title_text = "Floor %d" % fl
+
+	# Append complication flavor if present
+	var complication: String = GameManager.floor_complication
+	var comp_labels := {
+		"SURGE":     "  ·  Surge Alert",    "BOUNTY":    "  ·  Bounty Hunt",
+		"SENTINEL":  "  ·  Sentinel Watch", "DIM":       "  ·  Dim Torches",
+		"LOCKDOWN":  "  ·  Lockdown",       "PARANOID":  "  ·  Paranoid Guards",
+		"DRUNK_WATCH": "  ·  Drunk Watch",  "FOG":       "  ·  Heavy Fog",
+	}
+	if complication in comp_labels:
+		title_text += comp_labels[complication]
+
+	var card := CanvasLayer.new()
+	card.layer = 115
+	get_tree().root.add_child(card)
+
+	var script := GDScript.new()
+	script.source_code = """
+extends Control
+var _t := 0.0
+var _title_text := ""
+const _DUR := 3.0
+const _FADE_IN := 0.6
+const _FADE_OUT := 0.8
+func setup(txt: String):
+	_title_text = txt
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+func _process(delta):
+	_t += delta
+	queue_redraw()
+	if _t >= _DUR:
+		queue_free()
+func _draw():
+	var alpha := 0.0
+	if _t < _FADE_IN:
+		alpha = _t / _FADE_IN
+	elif _t < _DUR - _FADE_OUT:
+		alpha = 1.0
+	else:
+		alpha = (_DUR - _t) / _FADE_OUT
+	alpha = clampf(alpha, 0.0, 1.0)
+	var cx: float = 384.0
+	var cy: float = 272.0
+	draw_line(Vector2(cx - 180, cy + 14), Vector2(cx + 180, cy + 14),
+		Color(0.75, 0.65, 0.30, alpha * 0.45), 1.0)
+	draw_line(Vector2(cx - 180, cy - 18), Vector2(cx + 180, cy - 18),
+		Color(0.75, 0.65, 0.30, alpha * 0.35), 0.8)
+"""
+	script.reload()
+
+	var ctrl := Control.new()
+	ctrl.set_script(script)
+	card.add_child(ctrl)
+	ctrl.call("setup", title_text)
+
+	# Use a Label for the actual text (draw_string must be in CanvasItem._draw)
+	var lbl := Label.new()
+	lbl.text = title_text
+	lbl.add_theme_font_size_override("font_size", 14)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.modulate = Color(0.88, 0.80, 0.50, 0.0)
+	lbl.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	lbl.offset_top    = -8.0
+	lbl.offset_bottom = 16.0
+	lbl.offset_left   = -200.0
+	lbl.offset_right  =  200.0
+	lbl.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	card.add_child(lbl)
+
+	# Tween the label alpha
+	var tw := card.create_tween()
+	tw.tween_property(lbl, "modulate:a", 1.0, 0.6)
+	tw.tween_interval(1.8)
+	tw.tween_property(lbl, "modulate:a", 0.0, 0.8)
+	tw.tween_callback(card.queue_free)
+
+# ── V15: PITCH_BLACK — extinguish all torches once nodes are ready ────────────
+func _extinguish_all_torches() -> void:
+	for tn in get_tree().get_nodes_in_group("torches"):
+		if tn.has_method("extinguish"):
+			tn.call("extinguish")
+		elif tn.get("is_lit") != null:
+			tn.set("is_lit", false)
+		tn.queue_redraw()

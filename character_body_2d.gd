@@ -8,7 +8,9 @@ const _silence_scene  = preload("res://SilenceZone.tscn")
 const _dice_scene     = preload("res://DicePopup.tscn")
 
 enum NoiseLevel { SILENT, QUIET, LOUD }
-enum ItemType   { COIN, SMOKE, DART, ROPE, FLASH, HOLD, SILENCE, TOOLS, SHADOW_OIL, KEY }
+enum ItemType   { COIN, SMOKE, DART, ROPE, FLASH, HOLD, SILENCE, TOOLS, SHADOW_OIL, KEY,
+				  GRAPPLE_HOOK, CALTROPS, SLEEPING_DRAUGHT,
+				  POISON_VIAL, LOCKPICK_SET }
 
 const ITEM_DATA := {
 	ItemType.COIN:       { "name": "Gold Piece",        "color": Color(0.95, 0.80, 0.10) },
@@ -20,7 +22,12 @@ const ITEM_DATA := {
 	ItemType.SILENCE:    { "name": "Silence Scroll",    "color": Color(0.30, 0.20, 0.55) },
 	ItemType.TOOLS:      { "name": "Thieves' Tools",    "color": Color(0.70, 0.55, 0.30) },
 	ItemType.SHADOW_OIL: { "name": "Shadow Cloak",      "color": Color(0.20, 0.15, 0.35) },
-	ItemType.KEY:        { "name": "Iron Key",           "color": Color(0.90, 0.75, 0.20) },
+	ItemType.KEY:             { "name": "Iron Key",          "color": Color(0.90, 0.75, 0.20) },
+	ItemType.GRAPPLE_HOOK:    { "name": "Grapple Hook",      "color": Color(0.55, 0.65, 0.80) },
+	ItemType.CALTROPS:        { "name": "Caltrops",          "color": Color(0.60, 0.60, 0.55) },
+	ItemType.SLEEPING_DRAUGHT:{ "name": "Sleeping Draught",  "color": Color(0.30, 0.75, 0.55) },
+	ItemType.POISON_VIAL:     { "name": "Poison Vial",       "color": Color(0.40, 0.85, 0.25) },
+	ItemType.LOCKPICK_SET:    { "name": "Lockpick Set",      "color": Color(0.80, 0.60, 0.20) },
 }
 
 signal noise_emitted(level: NoiseLevel, world_position: Vector2)
@@ -57,6 +64,8 @@ var _cutpurse_free_item_used   := false  # Sleight of Hand — first item per fl
 
 # Weapon
 var weapon                   := "NONE"
+var _prev_weapon              := "NONE"   # for draw flourish
+var _weapon_draw_t            := 0.0      # >0 = weapon draw animation playing
 var _shiv_thrown              := false   # SHIV: once-per-floor throw
 var _stiletto_throws_left     := 0       # STILETTO: 2/floor
 var _crossbow_bolts           := 3       # resets per floor; REPEATING=5, SILENT_BOLT=999
@@ -67,6 +76,10 @@ var _garrote_hold_timer       := 0.0     # GARROTE: requires 2s hold on target
 var _throwing_knives_left     := 3       # THROW_STUN offhand: 3/floor
 var _nerve_steel_ready        := true    # NERVE_STEEL: first hit each floor always crits
 var _set_iron_save_ready      := true    # SET_IRON: failed takedown no-alert once/floor
+# ── Legendary artifact state ──────────────────────────────────────────────────
+var _whisper_throws_left      := 3       # WHISPER: 3 silent throws/floor
+var _mournfall_hits           := 0       # MOURNFALL: every 3rd hit = shockwave
+var _avarice_coins_left       := 2       # AVARICE: 2 coin-lures/floor
 
 # Gear slots
 var gear: Dictionary = { "boots": "", "cloak": "", "offhand": "", "trinket": "" }
@@ -142,7 +155,21 @@ const SNEAK_COOLDOWN := 0.26
 
 const SLOT_COUNT := 3
 
-# ── Sprite animation ─────────────────────────────────────────────────────────
+# ── Sprite sheets (32×40 cells, 4 frames × 4 dir rows: DOWN/LEFT/RIGHT/UP) ────
+const _PLAYER_TEX_PATH := {
+	"CUTPURSE":     "res://sprites/player_cutpurse.png",
+	"SHADOWDANCER": "res://sprites/player_shadowdancer.png",
+	"ASSASSIN":     "res://sprites/player_assassin.png",
+}
+static var _player_tex_cache := {}
+const _PSPR_CW := 32     # cell width
+const _PSPR_CH := 40     # cell height
+const _PSPR_SCALE := 0.62  # world-space scale (32×40 → ~20×25 px on the 16px grid)
+const _PSPR_FOOT_CELL_Y := 37.0  # foot baseline within the 40px cell (measured)
+const _PSPR_FOOT_WORLD_Y := 4.0  # where the feet land in node-local space
+const _PSPR_DIR_ROW := { "DOWN": 0, "LEFT": 1, "RIGHT": 2, "UP": 3 }
+
+# ── Legacy sheet (unused; kept for constant refs) ────────────────────────────
 const _SPRITE_SHEET   := "res://sprites/player_sheet.png"
 const _SPRITE_HFRAMES := 8    # 4 dirs × 2 walk frames
 const _SPRITE_VFRAMES := 12   # 3 classes × 4 races
@@ -179,8 +206,9 @@ func _setup_camera():
 		cam.position_smoothing_speed   = 8.0
 
 func _setup_sprite():
-	# V7: pure SVG procedural art — no sprite sheet needed
+	# Sprite art is blitted in _draw via _draw_player_sprite(); crisp pixels.
 	_sprite = null
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 
 func _get_facing_dir() -> String:
 	var f := facing.normalized()
@@ -248,6 +276,12 @@ func reset_floor_charges():
 	_runed_blade_charges       = GameManager._runed_blade_charges
 	GameManager._wand_charges  = 5
 	_shadowdancer_silent_kills = 0
+	# Legendaries
+	if weapon in ["TEMPEST", "HUSHWARD"]:
+		_crossbow_bolts = 999
+	_whisper_throws_left = 3
+	_mournfall_hits      = 0
+	_avarice_coins_left  = 2
 	_cutpurse_free_item_used   = false
 	keys                       = []
 	# QUICKSILVER FLASK: recharge per-floor active ability
@@ -268,6 +302,19 @@ func _auto_equip_all():
 		slot += 1
 
 func add_item(item_type: int, count: int):
+	# V15: CURSED complication — max 2 distinct item types
+	if GameManager.floor_complication == "CURSED" and item_type != ItemType.KEY:
+		var distinct_count := 0
+		var already_has := false
+		for item in items:
+			if item["type"] != ItemType.KEY:
+				if item["type"] == item_type:
+					already_has = true
+				else:
+					distinct_count += 1
+		if not already_has and distinct_count >= 2:
+			_popup("CURSED — item limit (2 max)!", Color(0.85, 0.30, 0.80))
+			return
 	for item in items:
 		if item["type"] == item_type:
 			item["count"] += count
@@ -349,6 +396,12 @@ func equip_gear(slot: String, gear_id: String):
 
 func _process(delta):
 	_anim_t += delta
+	# Weapon draw flourish
+	if weapon != _prev_weapon and _prev_weapon != "":
+		_weapon_draw_t = 0.45
+	_prev_weapon = weapon
+	if _weapon_draw_t > 0.0:
+		_weapon_draw_t -= delta
 	is_sneaking = Input.is_key_pressed(KEY_SHIFT) or Input.is_action_pressed("game_sneak")
 	if not is_sneaking:
 		for joypad in Input.get_connected_joypads():
@@ -679,8 +732,8 @@ func _resolve_takedown(guard):
 	var raw_behind := _is_behind_guard(guard)
 	var cls        := GameManager.selected_class
 
-	# ASSASSIN'S FANG: all attacks treated as rear
-	var behind := raw_behind or (weapon == "ASSASSIN_FANG")
+	# ASSASSIN'S FANG / WHISPER: all attacks treated as rear
+	var behind := raw_behind or (weapon in ["ASSASSIN_FANG", "WHISPER"])
 
 	# ASSASSIN mark: auto-execute regardless of position/dice
 	if _assassin_mark != null and is_instance_valid(_assassin_mark) and _assassin_mark == guard:
@@ -762,8 +815,15 @@ func _resolve_takedown(guard):
 
 	# ── Standard silent: behind or sneaking on unaware ───────────────────────────
 	if behind or (is_sneaking and guard.alert_state == 0):
-		# STILETTO: rear attacks always silent (SHIV too if sneaking)
-		_popup("SILENT KILL", Color(0.30, 1.00, 0.50))
+		# V14: PERFECT BACKSTAB — behind guard, fully undetected, guard drowsy or detection == 0
+		var is_perfect_bs: bool = behind and guard.get("detection_progress") != null \
+			and float(guard.get("detection_progress")) < 0.05
+		if is_perfect_bs:
+			var bs_bonus: int = 75 if guard.get("_fatigue_drowsy") == true else 50
+			GameManager.add_gold(bs_bonus)
+			_popup("PERFECT BACKSTAB! +%dgp" % bs_bonus, Color(1.0, 0.85, 0.10))
+		else:
+			_popup("SILENT KILL", Color(0.30, 1.00, 0.50))
 		guard.takedown(true)
 		GameManager.record_takedown()
 		_post_kill_effects(guard, true)
@@ -816,6 +876,7 @@ func _resolve_takedown(guard):
 	if weapon == "STILETTO" and behind:              roll = min(20, roll + 1)  # extra +1 vs unaware
 	if weapon == "GARROTE" and not behind:           roll = max(1, roll - 4)
 	if weapon == "ASSASSIN_FANG":                    roll = min(20, roll + 3)
+	if weapon == "WHISPER":                          roll = min(20, roll + 3)
 	# Gear modifiers
 	if GameManager.has_set_bonus("SET_THIEF"):       roll = min(20, roll + 3)
 	if has_gear("PATROL_SIGHT"):                     roll = min(20, roll + 1)
@@ -829,7 +890,7 @@ func _resolve_takedown(guard):
 			_popup("OPPORTUNIST! Side attack +3", Color(0.75, 0.85, 0.35))
 	if GameManager.get_guild_unlock("MASTERTHIEF") and raw == 1:
 		roll = max(roll, 5)
-	if weapon == "ASSASSIN_FANG" and raw == 1:
+	if weapon in ["ASSASSIN_FANG", "WHISPER"] and raw == 1:
 		roll = max(roll, 5)
 
 	# Natural 20
@@ -860,8 +921,8 @@ func _resolve_takedown(guard):
 	var threshold_miss  := 4  if cls == "ASSASSIN" else 8
 
 	if roll >= threshold_clean:
-		# STILETTO tier2+: rear is always silent
-		var silent_kill := behind and weapon in ["STILETTO", "ASSASSIN_FANG"]
+		# STILETTO tier2+: rear is always silent. WHISPER: always silent.
+		var silent_kill := (behind and weapon in ["STILETTO", "ASSASSIN_FANG"]) or weapon == "WHISPER"
 		_popup("d20: %d  ✓ Clean%s" % [roll, " (silent)" if silent_kill else ""], Color(0.30, 1.00, 0.50))
 		guard.takedown(silent_kill)
 		GameManager.record_takedown(not behind, not is_sneaking)
@@ -980,9 +1041,20 @@ func _do_combat_attack():
 		var was_alive := is_instance_valid(guard)
 		var hit_dir: Vector2 = (guard.global_position - global_position).normalized()
 		var slammed: bool = _is_guard_against_wall(guard, hit_dir)
-		guard.hurt(damage, hit_dir)
+		# PRONE: next hit auto-crits
+		var target_prone: bool = guard.get("_is_prone") != null and guard.get("_is_prone")
+		var actual_damage: int = damage * 2 if target_prone else damage
+		if target_prone:
+			_popup("AUTO-CRIT! (PRONE)", Color(1.0, 0.85, 0.20))
+		guard.hurt(actual_damage, hit_dir)
 		GameManager.record_combo_hit()
 		hit_any = true
+		# Apply weapon status effect to guard (BLEEDING, FEARED, PRONE, etc.)
+		if is_instance_valid(guard):
+			_apply_weapon_status_to_guard(guard)
+		# Nat20 finishing move check
+		if melee_nat20 and was_alive and is_instance_valid(guard):
+			_perform_finishing_move(guard)
 		# Wall slam: guard knocked into wall = bonus 1 damage
 		if slammed and is_instance_valid(guard):
 			guard.hurt(1, hit_dir)
@@ -1001,6 +1073,33 @@ func _do_combat_attack():
 			# Sword: Kill Momentum — each kill reduces remaining cooldown
 			elif weapon in ["LONGSWORD", "BROADSWORD", "BLADESONG"]:
 				_attack_cooldown = max(0.0, _attack_cooldown - 0.20)
+			# GRAVEWARDEN: each kill shaves the next wind-up harder — relentless.
+			elif weapon == "GRAVEWARDEN":
+				_attack_cooldown = max(0.0, _attack_cooldown - 0.30)
+
+	# MOURNFALL: every 3rd connecting strike unleashes a grief-shockwave.
+	if weapon == "MOURNFALL" and hit_any:
+		_mournfall_hits += 1
+		if _mournfall_hits % 3 == 0:
+			_popup("MOURNFALL — Widow's Shockwave!", Color(0.90, 0.55, 0.62))
+			GameManager.shake(4.5, 0.30)
+			for g in get_tree().get_nodes_in_group("guards"):
+				if is_instance_valid(g) and global_position.distance_to(g.global_position) <= 90.0:
+					if g.has_method("hurt"):
+						g.hurt(2, (g.global_position - global_position).normalized())
+					if is_instance_valid(g) and g.has_method("stagger"):
+						g.stagger(1.4)
+
+	# DOOMHOWL NAT20: every guard on the floor flees in terror.
+	if weapon == "DOOMHOWL" and melee_nat20 and hit_any:
+		_popup("NAT20  DOOMHOWL — The Watch Breaks!", Color(0.85, 0.20, 0.18))
+		GameManager.shake(6.0, 0.45)
+		for g in get_tree().get_nodes_in_group("guards"):
+			if is_instance_valid(g):
+				if g.has_method("apply_fear"):
+					g.apply_fear(4.0)
+				elif g.has_method("stagger"):
+					g.stagger(2.0)
 
 	# BROADSWORD NAT20: stagger all nearby enemies
 	if weapon == "BROADSWORD" and melee_nat20 and hit_any:
@@ -1055,17 +1154,46 @@ func _get_attack_tiles(shape: String) -> Array:
 	return guards_hit
 
 func _fire_wand_orb():
-	if GameManager._wand_charges <= 0:
+	var unlimited := weapon == "HUSHWARD"
+	if not unlimited and GameManager._wand_charges <= 0:
 		_popup("No charges!", Color(0.55, 0.40, 0.85))
 		return
-	GameManager._wand_charges -= 1
+	if not unlimited:
+		GameManager._wand_charges -= 1
 	var orb_script = load("res://WandOrb.gd")
 	var orb := Node2D.new()
 	orb.set_script(orb_script)
 	get_tree().root.add_child(orb)
 	orb.global_position = global_position
 	orb.setup(facing, 1)
-	_popup("Orb fired! (%d left)" % GameManager._wand_charges, Color(0.55, 0.30, 0.95))
+	if unlimited:
+		_popup("HUSHWARD — Silencing orb", Color(0.55, 0.45, 0.80))
+	else:
+		_popup("Orb fired! (%d left)" % GameManager._wand_charges, Color(0.55, 0.30, 0.95))
+
+# ── V12: Finishing move — called on Nat20 melee hit against a living guard ───
+func _perform_finishing_move(guard: Node2D) -> void:
+	var cm_node: Node = get_tree().get_first_node_in_group("combat_manager")
+	var result: Dictionary = {}
+	if cm_node != null and cm_node.has_method("resolve_finishing_move"):
+		result = cm_node.resolve_finishing_move(self, guard, 20)
+	var flavor: String  = result.get("flavor", "Perfect strike!")
+	var bonus_gold: int = result.get("bonus_gold", 25)
+	var bonus_xp: int   = result.get("bonus_xp", 2)
+	_popup(flavor, Color(1.0, 0.90, 0.20))
+	GameManager.add_gold(bonus_gold)
+	GameManager.add_xp(bonus_xp)
+	# Extra XP for style (on top of what CombatManager returns)
+	GameManager.add_xp(2)
+	# Screen flash + momentary shake for cinematic feel
+	GameManager.shake(5.0, 0.3)
+
+# ── V12: Apply weapon status effect to a guard after a successful hit ─────────
+func _apply_weapon_status_to_guard(guard: Node2D) -> void:
+	if not is_instance_valid(guard):
+		return
+	if guard.has_method("apply_weapon_status"):
+		guard.apply_weapon_status(weapon)
 
 func _try_dodge():
 	if _dodge_cooldown > 0.0 or is_carrying_body:
@@ -1228,8 +1356,27 @@ func _use_weapon_special():
 					Color(0.80, 0.78, 0.85), true)
 			else:
 				_popup("No throws left this floor", Color(0.55, 0.50, 0.45))
-		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT":
+		"CROSSBOW", "REPEATING_CROSSBOW", "SILENT_BOLT", "TEMPEST":
 			_fire_crossbow()
+		"WHISPER":
+			if _whisper_throws_left > 0:
+				_whisper_throws_left -= 1
+				_fire_thrown_blade(170.0, "WHISPER — silent throw  (%d left)" % _whisper_throws_left,
+					Color(0.78, 0.80, 0.95), true)
+			else:
+				_popup("Whisper is spent this floor", Color(0.55, 0.50, 0.45))
+		"AVARICE":
+			if _avarice_coins_left > 0:
+				_avarice_coins_left -= 1
+				_throw_pebble()
+				_popup("AVARICE — coin flung  (%d left)" % _avarice_coins_left, Color(0.95, 0.80, 0.20))
+			else:
+				_popup("No coins left this floor", Color(0.55, 0.50, 0.45))
+		"HUSHWARD":
+			var zone := _silence_scene.instantiate()
+			zone.global_position = global_position
+			get_tree().root.add_child(zone)
+			_popup("SCEPTRE OF HUSH — Zone of Silence", Color(0.55, 0.45, 0.80))
 		"VENOM_NEEDLE":
 			if _venom_needle_uses_left > 0:
 				_venom_needle_uses_left -= 1
@@ -1278,6 +1425,32 @@ func _post_kill_effects(guard, was_silent: bool):
 			if g != guard and global_position.distance_to(g.global_position) <= 80.0:
 				var cur: float = g.get("detection_progress")
 				g.set("detection_progress", max(0.0, cur - 0.3))
+	# ── Legendary on-kill effects ──────────────────────────────────────────────
+	# WHISPER: each kill drains the watch's attention from nearby guards.
+	if weapon == "WHISPER":
+		for g in get_tree().get_nodes_in_group("guards"):
+			if g != guard and is_instance_valid(g) and global_position.distance_to(g.global_position) <= 120.0:
+				var wd: float = g.get("detection_progress") if g.get("detection_progress") != null else 0.0
+				g.set("detection_progress", max(0.0, wd - 0.3))
+	# NIGHTWEAVE: kills in shadow refund the strike, bloom smoke, scatter attention.
+	if weapon == "NIGHTWEAVE" and _is_in_shadow():
+		_attack_cooldown = 0.0
+		_popup("NIGHTWEAVE — Shadowstitch!", Color(0.55, 0.45, 0.95))
+		if is_instance_valid(guard):
+			var cloud := _smoke_scene.instantiate()
+			cloud.global_position = guard.global_position
+			get_tree().root.add_child(cloud)
+		for g in get_tree().get_nodes_in_group("guards"):
+			if g != guard and is_instance_valid(g) and global_position.distance_to(g.global_position) <= 90.0:
+				var nd: float = g.get("detection_progress") if g.get("detection_progress") != null else 0.0
+				g.set("detection_progress", max(0.0, nd - 0.25))
+	# AVARICE: every life taken yields gold on the spot.
+	if weapon == "AVARICE":
+		GameManager.add_gold(60)
+		_popup("AVARICE — +60 gp collected", Color(0.95, 0.80, 0.20))
+	# DOOMHOWL: the blade wants to be known — each kill raises the hunt.
+	if weapon == "DOOMHOWL":
+		GameManager.raise_wanted_level(1)
 	# KILL_VANISH (Assassin's Shroud): go invisible for 2s after any kill
 	if has_gear("KILL_VANISH"):
 		GameManager._vanish_active = true
@@ -1296,6 +1469,18 @@ func _check_room_entry():
 	if cur_room == _last_room or cur_room < 0:
 		return
 	_last_room = cur_room
+
+	# V12: notify RoomManager about room entry (fires flavor text + HUD banner)
+	var rm := get_tree().get_first_node_in_group("room_manager") as Node
+	if rm == null:
+		rm = get_tree().root.find_child("RoomManager", true, false)
+	if rm and rm.has_method("get_current_room"):
+		var rd = rm.get_current_room(global_position)
+		if rd != null and rd.has_method("on_room_entered"):
+			rm.on_room_entered(rd, self)
+		elif rd != null and rm.has_method("on_room_entered"):
+			rm.on_room_entered(rd, self)
+
 	# Show patrol paths of all guards currently in this room
 	for g in get_tree().get_nodes_in_group("guards"):
 		if not is_instance_valid(g):
@@ -1582,7 +1767,12 @@ func _use_item(slot: int):
 				ItemType.HOLD:       consumed = _fire_hold()
 				ItemType.SILENCE:    _deploy_silence()
 				ItemType.TOOLS:      _use_tools()
-				ItemType.SHADOW_OIL: _use_shadow_oil()
+				ItemType.SHADOW_OIL:       _use_shadow_oil()
+				ItemType.GRAPPLE_HOOK:     consumed = _use_grapple_hook()
+				ItemType.CALTROPS:         _deploy_caltrops()
+				ItemType.SLEEPING_DRAUGHT: consumed = _throw_sleeping_draught()
+				ItemType.POISON_VIAL:      consumed = _throw_poison_vial()
+				ItemType.LOCKPICK_SET:     consumed = _use_lockpick_set()
 			if consumed:
 				if free_use:
 					_cutpurse_free_item_used = true
@@ -1734,6 +1924,27 @@ func _fire_crossbow() -> bool:
 						GameManager.record_takedown(true)
 					_popup("PIERCE — double hit!", Color(0.70, 0.50, 0.28))
 					break
+		# TEMPEST: the bolt forks to the nearest other guard within 90px.
+		if weapon == "TEMPEST" and is_instance_valid(best_guard):
+			var fork_origin: Vector2 = best_guard.global_position
+			var chain_target = null
+			var chain_dist := 90.0
+			for g2 in get_tree().get_nodes_in_group("guards"):
+				if g2 == best_guard or not is_instance_valid(g2):
+					continue
+				var d2: float = fork_origin.distance_to(g2.global_position)
+				if d2 < chain_dist:
+					chain_dist = d2
+					chain_target = g2
+			if chain_target != null:
+				_popup("TEMPEST — Chain Lightning!", Color(0.55, 0.85, 0.95))
+				if chain_target.get("alert_state") == chain_target.AlertState.ALERT:
+					chain_target.hurt(cdata["damage"])
+				else:
+					var ct_ref: Node = chain_target
+					chain_target.takedown(false)
+					GameManager.record_takedown(true)
+					_post_kill_effects(ct_ref, false)
 		var lbl := "SILENT BOLT — %dpx" % int(bolt_range) if is_silent \
 			else ("%s — %d left" % [weapon.replace("_", " "), bolts_left])
 		_popup(lbl, Color(0.55, 0.38, 0.22) if not is_silent else Color(0.85, 0.65, 0.35))
@@ -1882,6 +2093,184 @@ func _use_shadow_oil():
 	_popup("Shadow Cloak — guards blinded!", ITEM_DATA[ItemType.SHADOW_OIL].color)
 	AudioManager.ability_use()
 
+# ── Grapple Hook: teleport 4 tiles in facing direction silently ───────────────
+func _use_grapple_hook() -> bool:
+	var dst := global_position + facing * TILE_SIZE * 4
+	# Clamp to map bounds (world is ~768×576)
+	dst.x = clampf(dst.x, 16, 752)
+	dst.y = clampf(dst.y, 16, 560)
+	# Check if destination is walkable (no solid blocking — guard check)
+	var blocked := false
+	for guard in get_tree().get_nodes_in_group("guards"):
+		if guard.global_position.distance_to(dst) < 12.0:
+			blocked = true; break
+	if blocked:
+		_popup("Path blocked!", Color(0.90, 0.35, 0.20))
+		return false
+	# Silent teleport
+	var origin := global_position
+	global_position = dst
+	# Visual: brief trail of arc rings from origin to dest
+	for i in range(3):
+		var trail := Node2D.new()
+		trail.global_position = origin.lerp(dst, float(i + 1) / 4.0)
+		trail.z_index = 5
+		get_tree().root.add_child(trail)
+		var tween := trail.create_tween()
+		tween.tween_property(trail, "modulate:a", 0.0, 0.35)
+		tween.tween_callback(trail.queue_free)
+	_popup("GRAPPLE — silent dash!", ITEM_DATA[ItemType.GRAPPLE_HOOK].color)
+	AudioManager.step_quiet()
+	return true
+
+# ── Caltrops: drop a hazard that slows guards passing through ─────────────────
+func _deploy_caltrops() -> void:
+	var c := Node2D.new()
+	var cscript := GDScript.new()
+	cscript.source_code = """extends Node2D
+var _t := 0.0
+var _triggered := {}
+func _process(d):
+	_t += d
+	if _t > 30.0:
+		queue_free()
+		return
+	queue_redraw()
+	for g in get_tree().get_nodes_in_group(\"guards\"):
+		if g.global_position.distance_to(global_position) < 18.0 and not _triggered.has(g.get_instance_id()):
+			_triggered[g.get_instance_id()] = true
+			g.set(\"_is_slowed\", true)
+			g.set(\"_slow_timer\", 8.0)
+			if g.has_method(\"_on_noise_emitted\"):
+				g._on_noise_emitted(1, global_position)
+func _draw():
+	var a = clampf(1.0 - _t / 30.0, 0.0, 1.0)
+	for i in range(8):
+		var ang = i * TAU / 8.0
+		var p = Vector2(cos(ang), sin(ang)) * 6.0
+		draw_line(Vector2.ZERO, p, Color(0.65, 0.60, 0.55, a), 1.5)
+	draw_circle(Vector2.ZERO, 2.0, Color(0.55, 0.55, 0.50, a * 0.7))
+"""
+	c.set_script(cscript)
+	c.global_position = global_position
+	get_tree().root.add_child(c)
+	_popup("Caltrops deployed!", ITEM_DATA[ItemType.CALTROPS].color)
+	AudioManager.step_quiet()
+
+# ── Sleeping Draught: throw flask — guard in 80px falls asleep for 10s ────────
+func _throw_sleeping_draught() -> bool:
+	var target = null
+	var best_dist := 80.0
+	for guard in get_tree().get_nodes_in_group("guards"):
+		var d: float = global_position.distance_to(guard.global_position)
+		# Prefer guards we're facing
+		var dot: float = facing.dot((guard.global_position - global_position).normalized())
+		if d < best_dist and dot > 0.1:
+			best_dist = d
+			target = guard
+	if target == null:
+		_popup("No target in range!", Color(0.90, 0.35, 0.20))
+		return false
+	# Apply sleeping state (off-duty SLEEPING = 2 if guard has set_off_duty)
+	if target.has_method("set_off_duty"):
+		target.call("set_off_duty", 2)
+		# Wake them after 10s via timer
+		var wake_timer := get_tree().create_timer(10.0)
+		wake_timer.timeout.connect(func():
+			if is_instance_valid(target):
+				target.call("set_off_duty", 0)
+		)
+	else:
+		# Fallback: zero detection, set suspicious timer
+		target.set("detection", 0.0)
+		target.set("alert_state", 0)
+		target.set("de_escalate_timer", 12.0)
+	# Spawn a brief cloud visual
+	var cloud := _smoke_scene.instantiate()
+	cloud.global_position = target.global_position
+	cloud.modulate = Color(0.35, 0.90, 0.55, 0.85)
+	get_tree().root.add_child(cloud)
+	_popup("SLEEPING DRAUGHT — guard asleep 10s!", ITEM_DATA[ItemType.SLEEPING_DRAUGHT].color)
+	return true
+
+# ── V14: Poison Vial — thrown AOE; nearest guard in 80px gets SLOWED + BLEEDING ─
+func _throw_poison_vial() -> bool:
+	var best_guard = null
+	var best_dist := 80.0
+	for g in get_tree().get_nodes_in_group("guards"):
+		if not is_instance_valid(g):
+			continue
+		var d: float = global_position.distance_to(g.global_position)
+		if d < best_dist:
+			best_dist = d
+			best_guard = g
+	# Poison cloud visual regardless (shows where it landed)
+	var cloud_node := Node2D.new()
+	var cloud_script := GDScript.new()
+	cloud_script.source_code = """
+extends Node2D
+var _t := 0.0
+func _process(d):
+	_t += d
+	if _t > 6.0: queue_free()
+	queue_redraw()
+func _draw():
+	var a := clampf(1.0 - (_t - 4.0) / 2.0, 0.0, 0.75)
+	draw_circle(Vector2.ZERO, 18.0 + sin(_t * 4.0) * 2.0, Color(0.35, 0.80, 0.20, a * 0.5))
+	draw_arc(Vector2.ZERO, 18.0, 0.0, TAU, 20, Color(0.40, 0.90, 0.25, a), 1.5)
+"""
+	cloud_script.reload()
+	cloud_node.set_script(cloud_script)
+	cloud_node.global_position = global_position + facing * 24.0
+	get_tree().root.add_child(cloud_node)
+	if best_guard == null:
+		_popup("Poison — missed!", ITEM_DATA[ItemType.POISON_VIAL].color)
+		return true
+	# Apply SLOWED
+	if best_guard.has_method("apply_weapon_status"):
+		best_guard.call("apply_weapon_status", "SPEAR")   # SPEAR = SLOWED effect
+	# Apply BLEEDING manually
+	best_guard.set("_bleeding", true)
+	best_guard.set("_bleed_timer", 15.0)
+	best_guard.set("_bleed_damage_timer", 4.0)
+	if best_guard.has_method("_popup"):
+		best_guard.call("_popup", "POISONED!", Color(0.35, 0.80, 0.20))
+	emit_noise(NoiseLevel.QUIET)
+	_popup("Poison Vial — guard poisoned!", ITEM_DATA[ItemType.POISON_VIAL].color)
+	return true
+
+# ── V14: Lockpick Set — attempts to open nearest locked door ─────────────────
+func _use_lockpick_set() -> bool:
+	var best_door = null
+	var best_dist := 36.0
+	for door in get_tree().get_nodes_in_group("locked_doors"):
+		if not is_instance_valid(door):
+			continue
+		var d: float = global_position.distance_to(door.global_position)
+		if d < best_dist:
+			best_dist = d
+			best_door = door
+	if best_door == null:
+		_popup("No locked door nearby!", ITEM_DATA[ItemType.LOCKPICK_SET].color)
+		return false   # don't consume
+	# Skill check: DC 13 base; Thieves' Tools active gives +5; sneaking gives +2
+	# SkillCheck.roll(skill, dc, player_node) — rolls d20 + stat vs DC
+	var _SC2 = preload("res://SkillCheck.gd")
+	var result: Dictionary = _SC2.roll("DEX", 13, self)
+	# Show roll result as popup
+	var roll_total: int = result.get("total", 0)
+	var roll_raw:   int = result.get("roll",  0)
+	var success:   bool = result.get("success", false)
+	_popup("[%d] vs DC 13 — %s" % [roll_total, "SUCCESS" if success else "FAIL"],
+		Color(0.50, 0.90, 0.50) if success else Color(0.90, 0.40, 0.20))
+	if success:
+		best_door.call("_unlock")
+		_popup("PICKED! Door open.", ITEM_DATA[ItemType.LOCKPICK_SET].color)
+	else:
+		emit_noise(NoiseLevel.QUIET)
+		_popup("Fumbled — lock resists.", Color(0.85, 0.40, 0.20))
+	return true   # consumed on use
+
 func _try_use_offhand_active():
 	# Active offhand effects — called on a dedicated key (e.g. held E)
 	if has_gear("SPEED_BURST") and not _quicksilver_active:
@@ -2012,7 +2401,7 @@ func _draw():
 		draw_arc(vis, 5.0, 0, TAU, 16, Color(0.55, 0.30, 0.95, 0.30), 1.0)
 		draw_circle(vis, 2.0, Color(0.40, 0.20, 0.75, 0.18))
 	else:
-		_draw_player_svg(vis, f, perp, cls, race)
+		_draw_player_sprite(vis, f, cls)
 
 	# Wood Elf vanish shimmer
 	if race == "WOOD_ELF" and GameManager._vanish_active:
@@ -2029,6 +2418,16 @@ func _draw():
 			var nc := Color(1.0, 0.55, 0.15) if walking_loud else Color(0.35, 0.65, 1.0)
 			draw_arc(Vector2.ZERO, 22.0 * (1.0 - t * 0.6), 0, TAU, 20,
 				Color(nc.r, nc.g, nc.b, t * 0.22), 1.2)
+
+	# ── Weapon draw flourish ─────────────────────────────────────────────────
+	if _weapon_draw_t > 0.0:
+		var frac: float = _weapon_draw_t / 0.45
+		var arc_a: float = _anim_t * 12.0
+		var arc_r: float = 12.0 + (1.0 - frac) * 6.0
+		draw_arc(vis, arc_r, arc_a, arc_a + TAU * frac * 0.85, 20,
+			Color(0.95, 0.85, 0.25, frac * 0.75), 2.0)
+		draw_arc(vis, arc_r + 3.0, arc_a + 0.4, arc_a + TAU * frac * 0.5, 12,
+			Color(1.0, 1.0, 0.70, frac * 0.40), 1.2)
 
 	# ── Weapon visual (drawn on top of body, at vis offset) ──────────────────
 	_draw_weapon_svg(vis, f, perp)
@@ -2098,6 +2497,33 @@ func _draw():
 				Color(0.55, 0.30, 0.95, 0.20), 1.0)
 
 # ── SVG character drawing ─────────────────────────────────────────────────────
+func _player_tex(cls: String) -> Texture2D:
+	var path: String = _PLAYER_TEX_PATH.get(cls, _PLAYER_TEX_PATH["CUTPURSE"])
+	if _player_tex_cache.has(path):
+		return _player_tex_cache[path]
+	var tex: Texture2D = load(path) if ResourceLoader.exists(path) else null
+	_player_tex_cache[path] = tex
+	return tex
+
+func _draw_player_sprite(vis: Vector2, f: Vector2, cls: String) -> void:
+	var tex: Texture2D = _player_tex(cls)
+	if tex == null:
+		_draw_player_svg(vis, f, f.rotated(PI * 0.5), cls, GameManager.selected_race)
+		return
+	var row: int = _PSPR_DIR_ROW.get(_get_facing_dir(), 0)
+	var moving: bool = _move_cooldown > 0.02
+	var col: int = (int(_anim_t * 9.0) % 4) if moving else 0
+	var src := Rect2(col * _PSPR_CW, row * _PSPR_CH, _PSPR_CW, _PSPR_CH)
+	var sz: Vector2 = Vector2(_PSPR_CW, _PSPR_CH) * _PSPR_SCALE
+	# Anchor so the art's foot baseline lands at _PSPR_FOOT_WORLD_Y in node-local space.
+	var top_left: Vector2 = vis + Vector2(
+		-sz.x * 0.5,
+		_PSPR_FOOT_WORLD_Y - _PSPR_FOOT_CELL_Y * _PSPR_SCALE)
+	var mod := Color(1, 1, 1, 1)
+	if is_sneaking:
+		mod = Color(0.84, 0.88, 1.0, 0.82)
+	draw_texture_rect_region(tex, Rect2(top_left, sz), src, mod)
+
 func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, race: String):
 	# ── Isometric 3/4 perspective character renderer ──────────────────────────
 	# Painter's algorithm: shadow → back leg → boots → torso (3 faces) → cape →
@@ -2219,6 +2645,9 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 	draw_polyline(front_face + PackedVector2Array([front_face[0]]), outline_col, 0.7)
 	draw_polyline(top_face   + PackedVector2Array([top_face[0]]),   outline_col, 0.6)
 	draw_polyline(right_face + PackedVector2Array([right_face[0]]), outline_col, 0.6)
+	# Warm rim catching the lit top-left shoulder edge
+	draw_line(vis + Vector2(-tw + 0.2, -th + 0.2 + b), vis + Vector2(tw * 0.4, -th + 0.2 + b),
+		Color(1.0, 0.84, 0.58, 0.40 * sa), 0.7)
 
 	# Class-specific torso details
 	match cls:
@@ -2337,6 +2766,9 @@ func _draw_player_svg(vis_in: Vector2, f: Vector2, perp: Vector2, cls: String, r
 	draw_circle(head_pos + Vector2( 1.0, -1.5), head_r * 0.45, _shade(skin_col, 0.25, sa))
 	# Crisp head outline
 	draw_arc(head_pos, head_r, 0, TAU, 22, outline_col, 0.6)
+	# Warm torch rim-light catching the upper-left edge (ties figure to the scene lighting)
+	draw_arc(head_pos, head_r - 0.2, PI * 0.78, PI * 1.42, 10,
+		Color(1.0, 0.86, 0.62, 0.42 * sa), 0.8)
 
 	# Eyes (class-tinted glow)
 	var eye_col: Color

@@ -1,4 +1,5 @@
 extends Node2D
+const _SC = preload("res://SkillCheck.gd")
 
 const INTERACT_RANGE = 4.0
 const SENSE_RANGE    = 32.0
@@ -29,24 +30,23 @@ func interact(player: Node2D):
 		queue_redraw()
 		AudioManager.step_quiet()
 		return
-	var roll: int = GameManager.roll_d20()
-	# Dwarf stonecunning: always succeeds
+	# Use unified SkillCheck system (SLEIGHT_OF_HAND for disarming traps)
+	var dc: int = 10
 	if GameManager.selected_race == "DWARF":
-		roll = 20
-	# Show dice popup
+		dc = 1  # Dwarf stonecunning — trivially easy
+	var result: Dictionary = _SC.roll("SLEIGHT_OF_HAND", dc, player)
 	var popup = DicePopupScene.instantiate()
-	if roll >= 10:
-		popup.setup("Disarm %d ✓" % roll, Color(0.30, 0.95, 0.45))
-		popup.global_position = global_position + Vector2(0, -20)
-		get_tree().root.add_child(popup)
+	popup.setup(result.flavor_text, Color(0.30, 0.95, 0.45) if result.success else Color(1.0, 0.20, 0.20))
+	popup.global_position = global_position + Vector2(0, -20)
+	get_tree().root.add_child(popup)
+	if result.success:
 		_disarmed = true
 		queue_redraw()
 		AudioManager.step_quiet()
 	else:
-		popup.setup("Disarm %d ✗" % roll, Color(1.0, 0.20, 0.20))
-		popup.global_position = global_position + Vector2(0, -20)
-		get_tree().root.add_child(popup)
 		trigger()
+		if result.fumble:
+			GameManager.shake(5.0, 0.4)  # Nat1 = hard trigger
 
 func trigger():
 	_show_popup("TRAP!", Color(1.0, 0.15, 0.15))

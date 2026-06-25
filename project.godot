@@ -25,11 +25,16 @@ ClassDatabase="*res://data/ClassDatabase.gd"
 MetaProgress="*res://systems/MetaProgress.gd"
 CombatSystem="*res://systems/CombatSystem.gd"
 StealthSystem="*res://systems/StealthSystem.gd"
+StatusEffectManager="*res://StatusEffectManager.gd"
 _mcp_game_helper="*res://addons/godot_ai/runtime/game_helper.gd"
 
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/gemini_godot/plugin.cfg", "res://addons/godot_ai/plugin.cfg")
+
+[godot_ai]
+
+server_port=8080
 
 [input]
 

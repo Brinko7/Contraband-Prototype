@@ -1,4 +1,5 @@
 extends Node2D
+const _SC = preload("res://SkillCheck.gd")
 
 # Locked door — sits in a carved doorway gap, blocks movement until the player
 # uses the matching key (key_id). Spawned by World.gd at setup time.
@@ -10,6 +11,7 @@ var _t := 0.0
 
 func _ready():
 	add_to_group("interactable")
+	add_to_group("locked_doors")   # V14: lockpick set lookup
 	_build_collision()
 	queue_redraw()
 
@@ -41,34 +43,21 @@ func interact(player) -> void:
 		_try_lockpick(player)
 
 func _try_lockpick(player) -> void:
-	# Costs 1 smoke item to attempt; no item = hint only
-	if not player.has_method("remove_item") or not player.has_method("count_item"):
-		_popup("LOCKED — need key", Color(0.85, 0.30, 0.20))
-		return
-	if player.count_item(1) < 1:  # smoke = type 1
-		_popup("Need key or 1 Smoke to pick", Color(0.85, 0.30, 0.20))
-		return
-	# Consume item and roll
-	player.remove_item(1, 1)
 	_pick_attempts += 1
-	var roll: int = GameManager.roll_d20()
-	# Cutpurse +3, Thieves' Tools +5
-	if GameManager.selected_class == "CUTPURSE":
-		roll = mini(roll + 3, 20)
-	if GameManager.has_passive("TOOLS_BONUS"):
-		roll = mini(roll + 5, 20)
-		GameManager.active_passives.erase("TOOLS_BONUS")
-	if GameManager.has_gear_effect("LOCKPICK"):
-		roll = mini(roll + 4, 20)
-	# Difficulty rises with each attempt
-	var dc := 10 + (_pick_attempts - 1) * 4
-	if roll >= dc:
-		_popup("Pick %d ✓ (DC%d)" % [roll, dc], Color(0.40, 0.90, 0.45))
+	# Difficulty rises with each attempt; lock tier maps to SkillCheck DCs
+	var lock_tier: String = "SIMPLE" if _pick_attempts == 1 else \
+		("COMPLEX" if _pick_attempts == 2 else "MAGICAL")
+	var dc: int = _SC.get_dc(lock_tier) + (_pick_attempts - 1) * 2
+	var result: Dictionary = _SC.roll("LOCKPICK", dc, player)
+	_popup(result.flavor_text, Color(0.40, 0.90, 0.45) if result.success else Color(1.0, 0.20, 0.20))
+	if result.success:
 		_unlock()
+		AudioManager.step_quiet()
 	else:
-		_popup("Pick %d ✗ (DC%d) — noise!" % [roll, dc], Color(1.0, 0.20, 0.20))
+		# Fumble — loud clatter, guard detection
+		var noise_level := 2 if result.fumble else 1
 		if player.has_signal("noise_emitted"):
-			player.noise_emitted.emit(1, global_position)
+			player.noise_emitted.emit(noise_level, global_position)
 
 func _unlock():
 	is_locked = false

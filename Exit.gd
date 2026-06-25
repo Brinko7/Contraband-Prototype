@@ -24,6 +24,31 @@ func _on_player_exits(player: Node) -> void:
 	if player.has_method("save_items"):
 		player.call("save_items")
 
+	# Collect floor rating from EvidenceSystem
+	var rating_data: Dictionary = {}
+	var es = get_tree().get_first_node_in_group("evidence_system")
+	if es and es.has_method("get_end_of_floor_rating"):
+		rating_data = es.get_end_of_floor_rating()
+		# Apply bonus GP to player
+		var bonus_gp: int = rating_data.get("bonus_gp", 0)
+		if bonus_gp > 0:
+			GameManager.add_gold(bonus_gp)
+		# Apply rep bonus
+		var rep: int = rating_data.get("rep_bonus", 0)
+		if rep != 0 and GameManager.get("reputation") != null:
+			GameManager.set("reputation", GameManager.get("reputation") + rep)
+
+	# Show the floor results panel, then advance
+	var panel_script = load("res://FloorResultsPanel.gd")
+	if panel_script and not rating_data.is_empty():
+		var panel := CanvasLayer.new()
+		panel.set_script(panel_script)
+		get_tree().root.add_child(panel)
+		panel.setup(rating_data, _advance_floor)
+	else:
+		_advance_floor()
+
+func _advance_floor() -> void:
 	if GameManager.current_floor >= GameManager.MAX_FLOORS:
 		GameManager.escaped()
 	else:

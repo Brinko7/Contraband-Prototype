@@ -48,14 +48,47 @@ func _draw():
 	draw_rect(Rect2(0, 0, W, H), _BDR, false, 1.0)
 
 	var lm = get_tree().get_first_node_in_group("levelmap")
+	var plan_idx: int = 0
+	if lm != null and lm.get("_plan_idx") != null:
+		plan_idx = int(lm.get("_plan_idx"))
+
+	# CLASSIC uses the hand-tuned abstract layout; new plans project their real
+	# tile rects into the panel so the map matches the building you're in.
+	var room_rects: Array = ROOM_RECTS
+	var room_names: Array = ROOM_NAMES
+	var corridors: Array = CORRIDORS
+	var vault_idx: int = 5
+	var room_count: int = 7
+	if plan_idx != 0:
+		room_rects = []
+		room_names = []
+		corridors = []
+		var tile_rects: Array = lm.get("ROOM_TILE_RECTS") if lm.get("ROOM_TILE_RECTS") else []
+		var plan: Dictionary = lm.get("_plan") if lm.get("_plan") else {}
+		var plan_rooms: Array = plan.get("rooms", [])
+		vault_idx = int(plan.get("vault_idx", 0))
+		var mx := 4.0; var my := 4.0
+		var sx := (W - mx * 2.0) / 48.0
+		var sy := (H - my * 2.0) / 36.0
+		for ti in range(tile_rects.size()):
+			var tr: Rect2i = tile_rects[ti]
+			room_rects.append(Rect2(
+				mx + tr.position.x * sx, my + tr.position.y * sy,
+				maxf(tr.size.x * sx, 6.0), maxf(tr.size.y * sy, 6.0)))
+			var nm: String = "RM"
+			if ti < plan_rooms.size():
+				nm = String(plan_rooms[ti].get("name", "RM")).replace(" ", "").substr(0, 4).to_upper()
+			room_names.append(nm)
+		room_count = room_rects.size()
+
 	var visited: Array = []
 	if lm and lm.get("visited_rooms") != null:
 		visited = lm.visited_rooms
-	while visited.size() < 7:
+	while visited.size() < room_count:
 		visited.append(false)
 
 	var cleared: Array = GameManager.cleared_rooms
-	while cleared.size() < 7:
+	while cleared.size() < room_count:
 		cleared.append(false)
 
 	# Player position → current room
@@ -67,9 +100,9 @@ func _draw():
 		player_room = lm._tile_to_room(Vector2i(px, py))
 
 	# Draw corridor lines first (behind rooms)
-	for pair in CORRIDORS:
-		var ra: Rect2 = ROOM_RECTS[pair[0]]
-		var rb: Rect2 = ROOM_RECTS[pair[1]]
+	for pair in corridors:
+		var ra: Rect2 = room_rects[pair[0]]
+		var rb: Rect2 = room_rects[pair[1]]
 		var ca := ra.get_center()
 		var cb := rb.get_center()
 		var vis_a: bool = visited[pair[0]] if pair[0] < visited.size() else false
@@ -78,8 +111,8 @@ func _draw():
 		draw_line(ca, cb, Color(0.45, 0.40, 0.32, alpha), 1.0)
 
 	# Draw room boxes
-	for i in range(7):
-		var r: Rect2 = ROOM_RECTS[i]
+	for i in range(room_count):
+		var r: Rect2 = room_rects[i]
 		var vis: bool = visited[i] if i < visited.size() else false
 		var clr: bool = cleared[i] if i < cleared.size() else false
 		var is_current: bool = (i == player_room)
@@ -107,7 +140,7 @@ func _draw():
 
 		# Room label (small, only if visited)
 		if vis and r.size.x >= 18:
-			var lbl: String = ROOM_NAMES[i]
+			var lbl: String = room_names[i] if i < room_names.size() else ""
 			var font_size := 6 if r.size.x < 28 else 7
 			draw_string(font, r.position + Vector2(2, r.size.y - 2), lbl,
 				HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 2, font_size,
@@ -118,8 +151,8 @@ func _draw():
 			draw_string(font, r.get_center() + Vector2(-3, 3), "✓",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 7, Color(0.35, 0.95, 0.45, 0.80))
 
-		# vault_location intel: mark Vault (room 5) with a gold star regardless of visit state
-		if i == 5 and "vault_location" in GameManager.preheist_intel:
+		# vault_location intel: mark the Vault with a gold star regardless of visit state
+		if i == vault_idx and "vault_location" in GameManager.preheist_intel:
 			draw_string(font, r.get_center() + Vector2(-4, 4), "★",
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(1.0, 0.85, 0.20, 0.95))
 			draw_rect(r, Color(0.85, 0.70, 0.15, 0.18), true)

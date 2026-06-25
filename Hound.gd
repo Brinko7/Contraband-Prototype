@@ -4,7 +4,7 @@ enum AlertState { UNAWARE, SUSPICIOUS, ALERT }
 
 const _dice_scene   = preload("res://DicePopup.tscn")
 const _body_script  = preload("res://BodyMarker.gd")
-const _ENEMY_SHEET  = preload("res://sprites/enemy_sheet.png")
+const _ENEMY_SHEET  = preload("res://sprites/enemy_hound.png")
 
 const TILE_SIZE = 16
 const INVESTIGATE_DELAY = 0
@@ -50,10 +50,10 @@ func _ready():
 		chase_interval = max(0.12, chase_interval * 0.85)
 	_sprite = Sprite2D.new()
 	_sprite.texture = _ENEMY_SHEET
-	_sprite.hframes = 8
-	_sprite.vframes = 6
+	_sprite.hframes = 4   # 4 walk frames
+	_sprite.vframes = 4   # rows = facing: DOWN/LEFT/RIGHT/UP
 	_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	_sprite.offset = Vector2(0, -10)
+	_sprite.offset = Vector2(0, -12)  # baseline sits near node origin
 	_sprite.scale = Vector2(1.0, 1.0)
 	add_child(_sprite)
 
@@ -207,14 +207,14 @@ func _spawn_body():
 func _update_sprite():
 	if _sprite == null:
 		return
-	# Row 5 = HOUND; col: DOWN=0-1, LEFT=2-3, RIGHT=4-5, UP=6-7
-	var col_base: int
-	if facing == Vector2.DOWN:    col_base = 0
-	elif facing == Vector2.LEFT:  col_base = 2
-	elif facing == Vector2.RIGHT: col_base = 4
-	else:                         col_base = 6
-	var walk_frame := int(_anim_t * 4.0) % 2
-	_sprite.frame = 5 * 8 + col_base + walk_frame
+	# Rows = facing (DOWN=0, LEFT=1, RIGHT=2, UP=3); 4 walk frames per row.
+	var row: int
+	if facing == Vector2.DOWN:    row = 0
+	elif facing == Vector2.LEFT:  row = 1
+	elif facing == Vector2.RIGHT: row = 2
+	else:                         row = 3
+	var walk_frame := int(_anim_t * 6.0) % 4
+	_sprite.frame = row * 4 + walk_frame
 
 func _draw():
 	# Body shadow
@@ -244,12 +244,6 @@ func _draw():
 		draw_line(top, rgt, dc, 1.5); draw_line(rgt, bot, dc, 1.5)
 		draw_line(bot, lft, dc, 1.5); draw_line(lft, top, dc, 1.5)
 		draw_circle(Vector2(0, -14), 1.5, dc)
-
-	# Paw-print identity mark — two dots and a triangle instead of text
-	draw_circle(Vector2(-3, -20), 1.2, Color(0.82, 0.62, 0.30, 0.60))
-	draw_circle(Vector2( 3, -20), 1.2, Color(0.82, 0.62, 0.30, 0.60))
-	draw_colored_polygon(PackedVector2Array([Vector2(0,-23), Vector2(-2.5,-18), Vector2(2.5,-18)]),
-		Color(0.82, 0.62, 0.30, 0.45))
 
 func _is_blocked(target_pos: Vector2) -> bool:
 	var space = get_world_2d().direct_space_state

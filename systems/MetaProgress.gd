@@ -59,6 +59,9 @@ var citadel_clears:     int   = 0   # full 6-floor completions
 var city_heat:          int   = 0   # 0-5, persists and affects future runs
 var unlocked_classes:   Array = ["CUTPURSE","SHADOWDANCER","ASSASSIN"]
 
+# Legendary named weapons the player has ever recovered (the Hall of Arms).
+var discovered_legendaries: Array = []
+
 # Which heist targets have been completed (for narrative continuity)
 var completed_targets:  Array = []
 
@@ -154,6 +157,18 @@ func record_run_complete(score: int, gold: int, takedowns: int, alerts: int,
 	save_progress()
 	return {"rating": rating, "rep_gained": rep_gain, "heat_gained": heat_gain}
 
+# ── Legendary collection ────────────────────────────────────────────────────────
+# Records a legendary weapon as discovered. Returns true if it is a first find.
+func discover_legendary(weapon_id: String) -> bool:
+	if weapon_id in discovered_legendaries:
+		return false
+	discovered_legendaries.append(weapon_id)
+	save_progress()
+	return true
+
+func has_legendary(weapon_id: String) -> bool:
+	return weapon_id in discovered_legendaries
+
 func record_run_failed() -> void:
 	runs_attempted += 1
 	set_heat(clamp(city_heat + 1, 0, 5))
@@ -227,6 +242,7 @@ func save_progress() -> void:
 	cfg.set_value("meta", "city_heat",          city_heat)
 	cfg.set_value("meta", "unlocked_classes",   unlocked_classes)
 	cfg.set_value("meta", "completed_targets",  completed_targets)
+	cfg.set_value("meta", "discovered_legendaries", discovered_legendaries)
 	cfg.save(SAVE_PATH)
 
 func load_progress() -> void:
@@ -245,6 +261,7 @@ func load_progress() -> void:
 	city_heat          = cfg.get_value("meta", "city_heat",          0)
 	unlocked_classes   = cfg.get_value("meta", "unlocked_classes",   ["CUTPURSE","SHADOWDANCER","ASSASSIN"])
 	completed_targets  = cfg.get_value("meta", "completed_targets",  [])
+	discovered_legendaries = cfg.get_value("meta", "discovered_legendaries", [])
 
 func reset_all() -> void:
 	guild_rep = 0; lifetime_gold = 0; runs_completed = 0; runs_attempted = 0
@@ -252,4 +269,5 @@ func reset_all() -> void:
 	ghost_runs = 0; city_heat = 0
 	unlocked_classes = ["CUTPURSE","SHADOWDANCER","ASSASSIN"]
 	completed_targets = []
+	discovered_legendaries = []
 	save_progress()

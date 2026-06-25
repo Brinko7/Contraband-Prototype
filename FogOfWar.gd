@@ -41,10 +41,19 @@ func _draw():
 	if not visited or not map_data:
 		return
 
-	for i in range(min(visited.size(), ROOM_TILE_RECTS.size())):
+	# CLASSIC uses the inflated rects above (full corridor-mouth coverage). New
+	# floorplans fog their exact room rects, pulled live from the LevelMap.
+	var rects: Array = ROOM_TILE_RECTS
+	var pidx = lmap.get("_plan_idx")
+	if pidx != null and int(pidx) != 0:
+		var lm_rects: Array = lmap.get("ROOM_TILE_RECTS")
+		if lm_rects and lm_rects.size() > 0:
+			rects = lm_rects
+
+	for i in range(min(visited.size(), rects.size())):
 		if visited[i]:
 			continue
-		_fog_rect(ROOM_TILE_RECTS[i], map_data)
+		_fog_rect(rects[i], map_data)
 
 func _fog_rect(rect: Rect2i, map_data: Array):
 	for r in range(rect.position.y, rect.position.y + rect.size.y):

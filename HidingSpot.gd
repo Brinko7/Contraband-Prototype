@@ -1,7 +1,7 @@
 extends Node2D
 
 const INTERACT_RANGE = 18.0
-const _BARREL_TEX = preload("res://sprites/barrel_sprite.png")
+const _BARREL_TEX = preload("res://sprites/prop_barrel.png")
 
 var is_occupied := false
 var _scrounged  := false
@@ -12,7 +12,8 @@ func _ready():
 	var sp := Sprite2D.new()
 	sp.texture = _BARREL_TEX
 	sp.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	sp.scale = Vector2(1.5, 1.5)
+	sp.offset = Vector2(0, -14)  # baseline (y=30) sits at node origin
+	sp.scale = Vector2(0.85, 0.85)
 	add_child(sp)
 
 func _process(_delta):

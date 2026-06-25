@@ -40,6 +40,26 @@ var _relic_banner_color := Color.WHITE
 var _relic_banner_t     := 0.0
 const _RELIC_BANNER_DUR := 3.0
 
+# ── Room name display (V12) ───────────────────────────────────────────────────
+var _room_name_text := ""
+var _room_name_t    := 0.0
+const _ROOM_NAME_DUR := 3.5
+
+# ── Floor rumor ticker (V12) ──────────────────────────────────────────────────
+var _rumor_t         := 0.0        # countdown from 14s
+var _rumor_idx       := 0          # which rumor is currently shown
+const _RUMOR_SHOW_DUR := 14.0
+
+# ── Evidence alert flash (V12) ────────────────────────────────────────────────
+var _evidence_flash_t := 0.0
+const _EVIDENCE_FLASH_DUR := 2.0
+
+# ── Status effect display (V12) ───────────────────────────────────────────────
+var _status_effects_node: Control = null
+
+# ── Heist briefing panel (V12) ────────────────────────────────────────────────
+var _briefing_panel: Control = null
+
 # ── Inventory screen ─────────────────────────────────────────────────────────
 var _inv_screen: CanvasLayer = null
 
@@ -53,7 +73,12 @@ const ITEM_NAMES := {
 	6: "Silence",
 	7: "Thieves' Tools",
 	8: "Shadow Cloak",
-	9: "Iron Key",
+	9:  "Iron Key",
+	10: "Grapple Hook",
+	11: "Caltrops",
+	12: "Sleeping Draught",
+	13: "Poison Vial",
+	14: "Lockpick Set",
 }
 
 const ITEM_COLORS := {
@@ -66,7 +91,12 @@ const ITEM_COLORS := {
 	6: Color(0.30, 0.20, 0.55),
 	7: Color(0.70, 0.55, 0.30),
 	8: Color(0.20, 0.15, 0.35),
-	9: Color(0.90, 0.75, 0.20),
+	9:  Color(0.90, 0.75, 0.20),
+	10: Color(0.55, 0.65, 0.80),
+	11: Color(0.60, 0.60, 0.55),
+	12: Color(0.30, 0.75, 0.55),
+	13: Color(0.40, 0.85, 0.25),
+	14: Color(0.80, 0.60, 0.20),
 }
 
 func _ready():
@@ -78,9 +108,19 @@ func _ready():
 	GameManager.death_save_rolled.connect(_on_death_save_rolled)
 	GameManager.relic_collected.connect(_on_relic_collected)
 	GameManager.show_level_up.connect(_on_show_level_up)
+	# V12 signals
+	if GameManager.has_signal("room_entered"):
+		GameManager.room_entered.connect(_on_room_entered)
+	if GameManager.has_signal("evidence_found"):
+		GameManager.evidence_found.connect(_on_evidence_found)
+	if GameManager.has_signal("show_briefing"):
+		GameManager.show_briefing.connect(_on_show_briefing)
 	overlay.visible = false
 	_build_runtime_ui()
 	_show_floor_intro.call_deferred()
+	# Start floor rumor ticker
+	_rumor_t   = _RUMOR_SHOW_DUR
+	_rumor_idx = 0
 
 func _build_runtime_ui():
 	# ── Full-screen flash overlays ────────────────────────────────────────────
@@ -473,7 +513,15 @@ func _refresh_shop_ui():
 		for item in pitems:
 			var n: String = ITEM_NAMES.get(item.get("type", -1), "?")
 			inv += "%s x%d   " % [n, item.get("count", 0)]
-	overlay_stats.text = inv
+	# V12: append narrative flavor — heist target + macguffin
+	var narrative_flavor := ""
+	var target_name: String = GameManager.get("run_target_name") if GameManager.get("run_target_name") else ""
+	var macguffin: String   = GameManager.get("run_macguffin") if GameManager.get("run_macguffin") else ""
+	if not target_name.is_empty():
+		narrative_flavor = "\nMark: %s  ·  Objective: retrieve %s" % [target_name, macguffin if not macguffin.is_empty() else "the prize"]
+	elif not GameManager.floor_loot_name.is_empty():
+		narrative_flavor = "\n\"%s\"  —  %s" % [GameManager.floor_loot_name, GameManager.floor_loot_desc.substr(0, 72)]
+	overlay_stats.text = inv + narrative_flavor
 	overlay_stats.modulate = Color(0.55, 0.55, 0.50)
 
 	var next_floor := GameManager.current_floor + 1
@@ -567,6 +615,17 @@ func _process(delta):
 		var xp_bar := $Control.get_node_or_null("XPBar")
 		if xp_bar:
 			xp_bar.queue_redraw()
+
+	# V12 overlay timers
+	if _room_name_t > 0.0:
+		_room_name_t -= delta
+	if _evidence_flash_t > 0.0:
+		_evidence_flash_t -= delta
+	_update_rumors(delta)
+	_draw_v12_overlays()
+	_draw_combo_counter()
+	_draw_detection_warning()
+	_draw_threat_scanner()
 	if GameManager.state == GameManager.State.PASSIVE_PICK:
 		return
 	if GameManager.state == GameManager.State.SHOPPING:
@@ -865,3 +924,328 @@ func _on_state_changed(new_state: GameManager.State):
 				unlock_hint = "\nNext unlock at %d rep: %s" % [next_unlock.rep, next_unlock.name]
 			overlay_hint.text = "[R / Start]  Return to Guild" + unlock_hint
 			overlay_hint.modulate = Color(0.55, 0.50, 0.45)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V12 HUD ADDITIONS — room names, rumors, evidence alerts, status effects
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Room name display — triggered by RoomManager signal ──────────────────────
+func _on_room_entered(room_name: String) -> void:
+	_room_name_text = room_name.to_upper()
+	_room_name_t    = _ROOM_NAME_DUR
+
+# ── Evidence alert — triggered by EvidenceSystem signal ──────────────────────
+func _on_evidence_found(_evidence_type: String) -> void:
+	_evidence_flash_t = _EVIDENCE_FLASH_DUR
+
+# ── Rumor ticker — ticks in _process ─────────────────────────────────────────
+func _update_rumors(delta: float) -> void:
+	if _rumor_t <= 0.0:
+		return
+	_rumor_t -= delta
+	if _rumor_t <= 0.0:
+		_rumor_t = 0.0
+
+# ── Status effect indicators — drawn each frame ───────────────────────────────
+func _draw_status_effects() -> void:
+	# StatusEffectManager is an autoload; query it if available
+	var sem = get_node_or_null("/root/StatusEffectManager")
+	var active: Array = []
+	if sem != null and sem.has_method("get_active"):
+		active = sem.get_active()
+	# Build text for a persistent label
+	var fx_label := $Control.get_node_or_null("StatusFxLabel") as Label
+	if fx_label == null:
+		fx_label = Label.new()
+		fx_label.name = "StatusFxLabel"
+		fx_label.anchor_left   = 0.0; fx_label.anchor_right  = 0.0
+		fx_label.anchor_top    = 0.0; fx_label.anchor_bottom = 0.0
+		fx_label.offset_left   = 4.0;  fx_label.offset_right  = 240.0
+		fx_label.offset_top    = 140.0; fx_label.offset_bottom = 175.0
+		fx_label.add_theme_font_size_override("font_size", 9)
+		fx_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		fx_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		$Control.add_child(fx_label)
+	if active.is_empty():
+		fx_label.text = ""
+		return
+	var parts: Array[String] = []
+	for eff in active:
+		var col: Color = _status_effect_color(eff.id)
+		var dur_str: String = ""
+		if eff.has("remaining") and eff.remaining > 0:
+			dur_str = " %.0fs" % eff.remaining
+		parts.append("◈ %s%s" % [eff.id.replace("_", " "), dur_str])
+	fx_label.text = "  ".join(parts)
+
+func _status_effect_color(id: String) -> Color:
+	match id:
+		"BLEEDING":  return Color(0.90, 0.15, 0.15)
+		"BURNING":   return Color(1.00, 0.50, 0.05)
+		"POISONED":  return Color(0.25, 0.80, 0.25)
+		"FEARED":    return Color(0.65, 0.30, 0.90)
+		"SILENCED":  return Color(0.40, 0.40, 0.80)
+		"HASTED":    return Color(0.20, 0.90, 0.85)
+		"MARKED":    return Color(0.90, 0.30, 0.10)
+		"SLOWED":    return Color(0.55, 0.55, 0.65)
+		"INVISIBLE": return Color(0.60, 0.90, 1.00)
+	return Color(0.70, 0.70, 0.70)
+
+# ── V12 overlay draw — called from _process each frame ───────────────────────
+func _draw_v12_overlays() -> void:
+	# Room name fade — drawn via a Label we add on the fly or via draw_string on a
+	# Control child. Simplest: update a Label's text and alpha.
+	var rn_label := $Control.get_node_or_null("RoomNameLabel") as Label
+	if rn_label == null and _room_name_text != "":
+		rn_label = Label.new()
+		rn_label.name = "RoomNameLabel"
+		rn_label.anchor_left   = 0.5; rn_label.anchor_right  = 0.5
+		rn_label.anchor_top    = 0.0; rn_label.anchor_bottom = 0.0
+		rn_label.offset_left   = -150.0; rn_label.offset_right  = 150.0
+		rn_label.offset_top    = 42.0;   rn_label.offset_bottom = 62.0
+		rn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		rn_label.add_theme_font_size_override("font_size", 14)
+		rn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$Control.add_child(rn_label)
+	if rn_label:
+		if _room_name_t > 0.0:
+			var alpha: float = minf(_room_name_t / 0.5, 1.0) * minf(_room_name_t, 1.0)
+			rn_label.text    = _room_name_text
+			rn_label.modulate = Color(1.0, 0.90, 0.55, alpha)
+		else:
+			rn_label.text = ""
+
+	# Rumor ticker — italic flavor text along bottom-center for first 14s
+	var rumor_label := $Control.get_node_or_null("RumorLabel") as Label
+	if rumor_label == null:
+		rumor_label = Label.new()
+		rumor_label.name = "RumorLabel"
+		rumor_label.anchor_left   = 0.0; rumor_label.anchor_right  = 1.0
+		rumor_label.anchor_top    = 1.0; rumor_label.anchor_bottom = 1.0
+		rumor_label.offset_left   = 8.0;  rumor_label.offset_right  = -8.0
+		rumor_label.offset_top    = -96.0; rumor_label.offset_bottom = -78.0
+		rumor_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		rumor_label.add_theme_font_size_override("font_size", 10)
+		rumor_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$Control.add_child(rumor_label)
+	if rumor_label:
+		var rumors: Array = GameManager.get("floor_rumors") if GameManager.has_method("get") else []
+		if not rumors.is_empty() and _rumor_t > 0.0:
+			var rumor_text: String = str(rumors[_rumor_idx % rumors.size()])
+			var alpha: float = minf(_rumor_t / 1.5, 1.0) * minf(_rumor_t, 1.0)
+			rumor_label.text     = "◈  " + rumor_text + "  ◈"
+			rumor_label.modulate = Color(0.80, 0.70, 0.45, alpha * 0.70)
+		else:
+			rumor_label.text = ""
+
+	# Evidence flash — red "EVIDENCE FOUND" banner
+	if _evidence_flash_t > 0.0:
+		var evid_label := $Control.get_node_or_null("EvidenceLabel") as Label
+		if evid_label == null:
+			evid_label = Label.new()
+			evid_label.name = "EvidenceLabel"
+			evid_label.anchor_left   = 0.5; evid_label.anchor_right  = 0.5
+			evid_label.anchor_top    = 1.0; evid_label.anchor_bottom = 1.0
+			evid_label.offset_left   = -120.0; evid_label.offset_right  = 120.0
+			evid_label.offset_top    = -68.0;  evid_label.offset_bottom = -52.0
+			evid_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			evid_label.add_theme_font_size_override("font_size", 12)
+			evid_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			$Control.add_child(evid_label)
+		if evid_label:
+			var alpha: float = minf(_evidence_flash_t, 1.0)
+			evid_label.text     = "⚠  EVIDENCE FOUND  ⚠"
+			evid_label.modulate = Color(1.0, 0.25, 0.15, alpha)
+	else:
+		var evid_label := $Control.get_node_or_null("EvidenceLabel") as Label
+		if evid_label:
+			evid_label.text = ""
+
+	# ── Heat bar (top-right) — live evidence heat from EvidenceSystem ─────────
+	var heat_bar := $Control.get_node_or_null("HeatBar") as Control
+	if heat_bar == null:
+		heat_bar = Control.new()
+		heat_bar.name = "HeatBar"
+		heat_bar.anchor_right  = 1.0; heat_bar.anchor_left   = 1.0
+		heat_bar.anchor_top    = 0.0; heat_bar.anchor_bottom = 0.0
+		heat_bar.offset_left   = -120.0; heat_bar.offset_right  = -6.0
+		heat_bar.offset_top    = 38.0;   heat_bar.offset_bottom = 52.0
+		heat_bar.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+		$Control.add_child(heat_bar)
+		# Title label
+		var ht_lbl := Label.new()
+		ht_lbl.name = "HeatTitle"
+		ht_lbl.text = "HEAT"
+		ht_lbl.add_theme_font_size_override("font_size", 8)
+		ht_lbl.offset_left = 0.0; ht_lbl.offset_top = -10.0
+		ht_lbl.offset_right = 114.0; ht_lbl.offset_bottom = 0.0
+		ht_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		ht_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		heat_bar.add_child(ht_lbl)
+		# Background
+		var hbg := ColorRect.new(); hbg.name = "HeatBg"
+		hbg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		hbg.color = Color(0.1, 0.05, 0.05, 0.60)
+		heat_bar.add_child(hbg)
+		# Fill
+		var hfill := ColorRect.new(); hfill.name = "HeatFill"
+		hfill.set_anchors_and_offsets_preset(Control.PRESET_LEFT_WIDE)
+		hfill.color = Color(0.9, 0.2, 0.1, 0.80)
+		heat_bar.add_child(hfill)
+		# Label inside bar
+		var hval := Label.new(); hval.name = "HeatVal"
+		hval.add_theme_font_size_override("font_size", 8)
+		hval.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		hval.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		hval.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+		hval.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		heat_bar.add_child(hval)
+
+	if heat_bar:
+		var es = get_tree().get_first_node_in_group("evidence_system")
+		var heat: float = 0.0
+		if es and es.has_method("calculate_heat_bonus"):
+			heat = es.calculate_heat_bonus()
+		var fill_rect := heat_bar.get_node_or_null("HeatFill") as ColorRect
+		var val_lbl   := heat_bar.get_node_or_null("HeatVal")  as Label
+		if fill_rect:
+			fill_rect.anchor_right  = heat
+			fill_rect.offset_right  = 0.0
+			# Color shifts red → deep orange as heat rises
+			var r := lerpf(0.55, 1.00, heat)
+			var g := lerpf(0.25, 0.10, heat)
+			fill_rect.color = Color(r, g, 0.05, 0.85)
+		if val_lbl:
+			val_lbl.text = "%.0f%%" % (heat * 100.0) if heat > 0.02 else "COLD"
+
+# ── Detection warning — "SPOTTED" pulse when a guard is near 100% detection ──
+func _draw_detection_warning() -> void:
+	var max_det: float = 0.0
+	for guard in get_tree().get_nodes_in_group("guards"):
+		var det: float = float(guard.get("detection") if guard.get("detection") != null else 0)
+		if det > max_det:
+			max_det = det
+
+	var warn_lbl := $Control.get_node_or_null("DetectWarnLabel") as Label
+	if warn_lbl == null:
+		warn_lbl = Label.new()
+		warn_lbl.name = "DetectWarnLabel"
+		warn_lbl.anchor_left   = 0.5; warn_lbl.anchor_right  = 0.5
+		warn_lbl.anchor_top    = 0.5; warn_lbl.anchor_bottom = 0.5
+		warn_lbl.offset_left   = -80.0; warn_lbl.offset_right  = 80.0
+		warn_lbl.offset_top    = -82.0; warn_lbl.offset_bottom = -62.0
+		warn_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		warn_lbl.add_theme_font_size_override("font_size", 14)
+		warn_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$Control.add_child(warn_lbl)
+
+	if max_det >= 85.0:
+		var pulse: float = 0.6 + 0.4 * abs(sin(_hud_t * 9.0))
+		var intensity: float = (max_det - 85.0) / 15.0  # 0→1 as det goes 85→100
+		warn_lbl.text = "! DETECTED !" if max_det >= 98.0 else "SPOTTING..."
+		warn_lbl.modulate = Color(1.0, 0.20 + intensity * 0.30, 0.10, pulse)
+	else:
+		warn_lbl.text = ""
+
+# ── Combo counter — centre-screen, fades when combo resets ───────────────────
+func _draw_combo_counter() -> void:
+	var combo: int = GameManager.combo_hits
+	var tier:  int = GameManager.combo_tier
+	var lbl := $Control.get_node_or_null("ComboLabel") as Label
+	if lbl == null:
+		lbl = Label.new()
+		lbl.name = "ComboLabel"
+		lbl.anchor_left   = 0.5; lbl.anchor_right  = 0.5
+		lbl.anchor_top    = 0.5; lbl.anchor_bottom = 0.5
+		lbl.offset_left   = -80.0; lbl.offset_right  = 80.0
+		lbl.offset_top    = -60.0; lbl.offset_bottom = -36.0
+		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lbl.add_theme_font_size_override("font_size", 18)
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$Control.add_child(lbl)
+
+	if combo < 2:
+		lbl.text = ""
+		return
+
+	var tier_names := ["", "SHARP", "RELENTLESS", "GHOST"]
+	var tier_colors := [Color.WHITE,
+		Color(0.95, 0.80, 0.20),  # SHARP — gold
+		Color(1.00, 0.45, 0.10),  # RELENTLESS — orange
+		Color(0.55, 0.20, 0.90)]  # GHOST — purple
+	var col: Color = tier_colors[clampi(tier, 0, 3)]
+	var label_text := "×%d" % combo
+	if tier >= 1:
+		label_text = "%s  ×%d" % [tier_names[clampi(tier, 0, 3)], combo]
+	lbl.text     = label_text
+	lbl.modulate = col
+
+# ── Heist briefing panel ──────────────────────────────────────────────────────
+func _on_show_briefing() -> void:
+	# Create briefing panel if needed
+	if _briefing_panel == null or not is_instance_valid(_briefing_panel):
+		_briefing_panel = Control.new()
+		_briefing_panel.set_script(load("res://HeistBriefingPanel.gd"))
+		_briefing_panel.name = "HeistBriefingPanel"
+		_briefing_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_briefing_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		_briefing_panel.z_index = 100
+		# Wire dismissal
+		_briefing_panel.briefing_dismissed.connect(_on_briefing_dismissed)
+		$Control.add_child(_briefing_panel)
+	(_briefing_panel as Control).call("show_briefing")
+
+func _on_briefing_dismissed() -> void:
+	# Briefing done — continue to floor intro or gameplay
+	_show_floor_intro.call_deferred()
+
+# ── V16: Threat Scanner — guard blip minimap (intel: guard_routes purchased) ──
+func _draw_threat_scanner() -> void:
+	if GameManager.state != GameManager.State.PLAYING:
+		return
+	# Only visible with guard_routes intel OR on floors where player has
+	# purchased patrol_schedule intel
+	var has_scanner := "guard_routes" in GameManager.preheist_intel \
+		or "patrol_schedule" in GameManager.preheist_intel
+	if not has_scanner:
+		return
+	var ctrl := $Control
+	if ctrl == null:
+		return
+	# Draw in bottom-left corner
+	var origin := Vector2(14.0, ctrl.size.y - 90.0)
+	var map_w   := 80.0
+	var map_h   := 60.0
+	const WORLD_W := 768.0
+	const WORLD_H := 576.0
+
+	# Background
+	var bg_rect := Rect2(origin.x - 2, origin.y - 2, map_w + 4, map_h + 4)
+	ctrl.draw_rect(bg_rect, Color(0.04, 0.04, 0.06, 0.75))
+	ctrl.draw_rect(bg_rect, Color(0.30, 0.55, 0.30, 0.50), false, 0.8)
+
+	# Player blip
+	var player := get_tree().get_first_node_in_group("player")
+	if player:
+		var pp: Vector2 = (player as Node2D).global_position
+		var px := origin.x + (pp.x / WORLD_W) * map_w
+		var py := origin.y + (pp.y / WORLD_H) * map_h
+		ctrl.draw_circle(Vector2(px, py), 2.5, Color(0.30, 0.90, 0.50, 0.90))
+
+	# Guard blips
+	for g in get_tree().get_nodes_in_group("guards"):
+		if not is_instance_valid(g):
+			continue
+		var gp: Vector2 = (g as Node2D).global_position
+		var gx := origin.x + (gp.x / WORLD_W) * map_w
+		var gy := origin.y + (gp.y / WORLD_H) * map_h
+		var alert: int = g.get("alert_state") if g.get("alert_state") != null else 0
+		var blip_col: Color
+		match alert:
+			2: blip_col = Color(1.0, 0.20, 0.10, 0.90)   # ALERT: red
+			1: blip_col = Color(1.0, 0.75, 0.15, 0.80)   # SUSPICIOUS: yellow
+			_: blip_col = Color(0.65, 0.65, 0.65, 0.60)  # UNAWARE: grey
+		ctrl.draw_circle(Vector2(gx, gy), 1.8, blip_col)
+
+	# Label
+	ctrl.draw_rect(Rect2(origin.x, origin.y - 10, map_w, 9), Color(0.04, 0.04, 0.06, 0.70))

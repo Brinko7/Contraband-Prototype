@@ -8,14 +8,22 @@ const _dice_scene = preload("res://DicePopup.tscn")
 @export var is_bonus := false
 @export var loot_value := 200
 @export var rarity: int = 0  # GameManager.Rarity: 0=COMMON, 1=UNCOMMON, 2=RARE
+@export var item_name := ""  # Optional: override display name (e.g. "Blood Diamond")
+@export var is_contraband := false  # Contraband items flag
 
 # Chest type: 0=iron, 1=ornate, 2=arcane
 @export var chest_type: int = 0
+
+const _CHEST_TEX_PATH := "res://sprites/prop_chest.png"
+static var _chest_tex: Texture2D = null
 
 var _bob_t := 0.0
 var _opened := false
 
 func _ready():
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	if _chest_tex == null and ResourceLoader.exists(_CHEST_TEX_PATH):
+		_chest_tex = load(_CHEST_TEX_PATH)
 	# Auto-select chest visual based on rarity
 	if is_bonus: chest_type = 2
 	elif rarity >= 2: chest_type = 1
@@ -56,6 +64,12 @@ func _get_glow_color() -> Color:
 func _draw_chest_closed(glow_col: Color, pulse: float):
 	# Ground shadow for all chest types
 	draw_ellipse_filled(Vector2(0, 7), 11.0, 2.4, Color(0, 0, 0, 0.50))
+
+	if _chest_tex != null:
+		# 24x24 frame 0 (closed); baseline y=21 lands on ground point (node y≈7).
+		draw_texture_rect_region(_chest_tex, Rect2(Vector2(-12, -14), Vector2(24, 24)),
+			Rect2(0, 0, 24, 24))
+		return
 
 	match chest_type:
 		0: _draw_iron_chest(glow_col, pulse)
@@ -368,6 +382,15 @@ func _draw_chest_open(glow_col: Color, pulse: float):
 	# Ground shadow
 	draw_ellipse_filled(Vector2(0, 7), 12.0, 2.6, Color(0, 0, 0, 0.55))
 
+	if _chest_tex != null:
+		# 24x24 frame 1 (open, gold glow)
+		draw_texture_rect_region(_chest_tex, Rect2(Vector2(-12, -14), Vector2(24, 24)),
+			Rect2(24, 0, 24, 24))
+		# Inner glow rim — kept as FX, tinted to rarity.
+		draw_line(Vector2(-7, -2), Vector2(7, -2),
+			Color(glow_col.r, glow_col.g, glow_col.b, 0.85), 1.0)
+		return
+
 	var wood: Color
 	var wood_dk: Color
 	var trim: Color = Color(0.92, 0.72, 0.20)
@@ -486,14 +509,22 @@ func interact(player: Node2D):
 		return
 	if not is_bonus:
 		# Show named loot with flavor description
+		var display_name: String = item_name if item_name != "" else GameManager.get_main_loot_name()
+		var display_col := Color(0.95, 0.30, 0.20) if is_contraband else Color(0.95, 0.82, 0.22)
 		var popup := _dice_scene.instantiate()
-		popup.setup(GameManager.get_main_loot_name(), Color(0.95, 0.82, 0.22))
+		popup.setup(display_name, display_col)
 		popup.global_position = global_position + Vector2(0, -28)
 		get_tree().root.add_child(popup)
-		var desc_popup := _dice_scene.instantiate()
-		desc_popup.setup(GameManager.get_main_loot_desc(), Color(0.75, 0.70, 0.55))
-		desc_popup.global_position = global_position + Vector2(0, -14)
-		get_tree().root.add_child(desc_popup)
+		if not is_contraband:
+			var desc_popup := _dice_scene.instantiate()
+			desc_popup.setup(GameManager.get_main_loot_desc(), Color(0.75, 0.70, 0.55))
+			desc_popup.global_position = global_position + Vector2(0, -14)
+			get_tree().root.add_child(desc_popup)
+		else:
+			var hot_popup := _dice_scene.instantiate()
+			hot_popup.setup("⚠ CONTRABAND — fence carefully", Color(1.0, 0.40, 0.15))
+			hot_popup.global_position = global_position + Vector2(0, -14)
+			get_tree().root.add_child(hot_popup)
 		# CURSED_VAULT: trigger nearest trap when grabbing primary loot
 		if GameManager.run_modifier == "CURSED_VAULT":
 			_trigger_nearest_trap()
@@ -512,6 +543,12 @@ func interact(player: Node2D):
 		value = int(value * 1.5)
 	GameManager.add_gold(value)
 	_gold_popup(value)
+	# V15: track contraband for Fence NPC
+	if is_contraband:
+		var prev_val: int = player.get_meta("contraband_value", 0)
+		var prev_cnt: int = player.get_meta("contraband_count", 0)
+		player.set_meta("contraband_value", prev_val + value)
+		player.set_meta("contraband_count", prev_cnt + 1)
 	if is_bonus:
 		GameManager.collect_bonus_loot()
 		player.emit_noise(player.NoiseLevel.QUIET)

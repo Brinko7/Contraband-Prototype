@@ -90,18 +90,39 @@ func _build_result() -> void:
 	var new_heat: int      = MetaProgress.city_heat
 	var heat_data: Dictionary = MetaProgress.get_heat_data()
 
+	# Pull narrative context from GameManager (written by RunNarrative on floor start)
+	var target_name:  String = str(GameManager.get("run_target_name")  if GameManager.get("run_target_name")  != null else "")
+	var macguffin:    String = str(GameManager.get("run_macguffin")     if GameManager.get("run_macguffin")    != null else "")
+	# Floor stealth rating from EvidenceSystem (if available)
+	var stealth_rating: String = ""
+	var stealth_color: Color   = COL_DIM
+	var es = get_tree().get_first_node_in_group("evidence_system")
+	if es and es.has_method("get_end_of_floor_rating"):
+		var er: Dictionary = es.get_end_of_floor_rating()
+		stealth_rating = er.get("rating", "")
+		stealth_color  = er.get("color",  COL_DIM)
+		# Include evidence bonus GP in score lines
+		var bonus_gp: int = er.get("bonus_gp", 0)
+		if bonus_gp > 0:
+			_score_lines.append({"label": "Evidence bonus (%s)" % stealth_rating,
+				"value": "+ %d gp" % bonus_gp, "color": stealth_color})
+
 	_result = {
-		"success":      success,
-		"rating":       rating,
-		"score":        score,
-		"rep_gained":   rep_gained,
-		"heat_change":  heat_change,
-		"new_heat":     new_heat,
-		"heat_name":    heat_data.get("name", "Unknown"),
-		"heat_color":   heat_data.get("color", COL_DIM),
-		"story":        GameManager.get_story_sign_off(),
-		"floors":       floors,
-		"ghost":        ghost,
+		"success":        success,
+		"rating":         rating,
+		"score":          score,
+		"rep_gained":     rep_gained,
+		"heat_change":    heat_change,
+		"new_heat":       new_heat,
+		"heat_name":      heat_data.get("name", "Unknown"),
+		"heat_color":     heat_data.get("color", COL_DIM),
+		"story":          GameManager.get_story_sign_off(),
+		"floors":         floors,
+		"ghost":          ghost,
+		"target_name":    target_name,
+		"macguffin":      macguffin,
+		"stealth_rating": stealth_rating,
+		"stealth_color":  stealth_color,
 	}
 
 	for _i in _score_lines.size():
@@ -198,6 +219,33 @@ func _draw() -> void:
 	# Separator
 	draw_line(Vector2(cx - 180, cy - 145 + oy), Vector2(cx + 180, cy - 145 + oy),
 		Color(rating_color.r, rating_color.g, rating_color.b, header_alpha * 0.4), 1.0)
+
+	# ── Narrative subtitle (target + macguffin) ──────────────────────────────
+	var target_name:  String = _result.get("target_name", "")
+	var macguffin:    String = _result.get("macguffin", "")
+	var stealth_rtg:  String = _result.get("stealth_rating", "")
+	var stealth_col:  Color  = _result.get("stealth_color", COL_DIM)
+	if not target_name.is_empty() and header_alpha > 0.3:
+		var sub_alpha: float = clampf((header_alpha - 0.3) * 2.0, 0.0, 1.0)
+		var narrative_y := cy - 140.0 + oy
+		if not success:
+			narrative_y = cy - 155.0 + oy
+		var mark_text := "MARK: %s" % target_name.to_upper()
+		draw_string(ThemeDB.fallback_font, Vector2(cx - 160, narrative_y),
+			mark_text, HORIZONTAL_ALIGNMENT_LEFT, 320, 10,
+			Color(COL_SILVER.r, COL_SILVER.g, COL_SILVER.b, sub_alpha * 0.65))
+		if not macguffin.is_empty():
+			draw_string(ThemeDB.fallback_font, Vector2(cx + 160, narrative_y),
+				macguffin.to_upper(), HORIZONTAL_ALIGNMENT_RIGHT, 200, 10,
+				Color(COL_GOLD.r, COL_GOLD.g, COL_GOLD.b, sub_alpha * 0.65))
+	if not stealth_rtg.is_empty() and header_alpha > 0.5:
+		var sr_alpha: float = clampf((header_alpha - 0.5) * 3.0, 0.0, 1.0)
+		draw_string(ThemeDB.fallback_font, Vector2(cx - 160, cy - 148.0 + oy),
+			"EVIDENCE RATING:", HORIZONTAL_ALIGNMENT_LEFT, 160, 9,
+			Color(COL_DIM.r, COL_DIM.g, COL_DIM.b, sr_alpha * 0.70))
+		draw_string(ThemeDB.fallback_font, Vector2(cx + 160, cy - 148.0 + oy),
+			stealth_rtg, HORIZONTAL_ALIGNMENT_RIGHT, 80, 10,
+			Color(stealth_col.r, stealth_col.g, stealth_col.b, sr_alpha * 0.90))
 
 	# ── Score lines ───────────────────────────────────────────────────────────
 	var line_y := cy - 128.0 + oy

@@ -294,12 +294,28 @@ func _draw_stats_tab(vp: Vector2) -> void:
 		["Takedowns",       str(_mp.lifetime_takedowns)],
 		["Alerts Caused",   str(_mp.lifetime_alerts)],
 		["Best Rating",     _mp.best_rating if not _mp.best_rating.is_empty() else "None"],
+		["Legendaries Found", "%d / %d" % [_mp.discovered_legendaries.size(), GameManager.LEGENDARY_WEAPONS.size()]],
 	]
 	for row in rows:
 		draw_rect(Rect2(cx, cy, vp.x - 48, 22), Color(0.09, 0.07, 0.13))
 		_draw_text(row[0], Vector2(cx + 10, cy + 6), 11, Color(0.60, 0.56, 0.72))
 		_draw_text(row[1], Vector2(cx + vp.x * 0.6, cy + 6), 11, Color(0.92, 0.88, 0.75))
 		cy += 26.0
+
+	# Hall of Arms — a star per legendary; lit if recovered, named on the strip.
+	_draw_text("HALL OF ARMS", Vector2(cx + 2, cy), 9, Color(0.65, 0.55, 0.80))
+	var sw: float = (vp.x - 48) / float(GameManager.LEGENDARY_WEAPONS.size())
+	for li in range(GameManager.LEGENDARY_WEAPONS.size()):
+		var wid: String = GameManager.LEGENDARY_WEAPONS[li]
+		var wdata: Dictionary = GameManager.WEAPONS.get(wid, {})
+		var found: bool = wid in _mp.discovered_legendaries
+		var star_c: Color = wdata.get("color", Color(0.8,0.7,0.3)) if found else Color(0.22, 0.20, 0.28)
+		var ctr := Vector2(cx + sw * (li + 0.5), cy + 18.0)
+		_draw_star(ctr, 5.0, star_c)
+		if found:
+			_draw_text_centered(wdata.get("name","").split(",")[0], Vector2(ctr.x, cy + 24.0), 6,
+				Color(star_c.r, star_c.g, star_c.b, 0.85))
+	cy += 30.0
 
 	# Lay Low button — spend 15 rep to reduce heat by 1
 	if _mp.city_heat > 0:
@@ -416,6 +432,19 @@ func _draw_text_centered(text: String, pos: Vector2, size: int, color: Color) ->
 	draw_string(ThemeDB.fallback_font, pos - Vector2(w * 0.5, 0), text,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
 
+func _draw_star(center: Vector2, radius: float, color: Color) -> void:
+	var pts := PackedVector2Array([
+		center + Vector2(0, -radius),
+		center + Vector2(radius * 0.28, -radius * 0.28),
+		center + Vector2(radius, 0),
+		center + Vector2(radius * 0.28, radius * 0.28),
+		center + Vector2(0, radius),
+		center + Vector2(-radius * 0.28, radius * 0.28),
+		center + Vector2(-radius, 0),
+		center + Vector2(-radius * 0.28, -radius * 0.28),
+	])
+	draw_colored_polygon(pts, color)
+
 # Input
 func _unhandled_input(event: InputEvent) -> void:
 	var pressed: bool = false
@@ -507,7 +536,7 @@ func _begin_run() -> void:
 func _handle_stats_click(pos: Vector2, vp: Vector2) -> void:
 	if _mp.city_heat <= 0:
 		return
-	var lby: float = 92.0 + 7 * 26.0 + 8.0  # below the 7 stat rows
+	var lby: float = 92.0 + 9 * 26.0 + 30.0 + 8.0  # below 9 stat rows + Hall of Arms strip
 	if Rect2(24.0, lby, vp.x - 48, 32).has_point(pos):
 		_try_lay_low()
 

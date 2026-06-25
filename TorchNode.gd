@@ -1,7 +1,7 @@
 extends Node2D
 
 const INTERACT_RANGE = 22.0
-const _TORCH_SHEET = preload("res://sprites/torch_sheet.png")
+const _TORCH_SHEET = preload("res://sprites/prop_torch.png")
 
 var is_lit := true
 var _anim_t := 0.0
@@ -12,18 +12,20 @@ func _ready():
 	add_to_group("interactable")
 	_sprite = Sprite2D.new()
 	_sprite.texture = _TORCH_SHEET
-	_sprite.hframes = 3
+	_sprite.hframes = 4
 	_sprite.vframes = 1
 	_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	_sprite.scale = Vector2(2.0, 2.0)
+	_sprite.offset = Vector2(0, -10)  # baseline (y=24) sits at node origin
 	add_child(_sprite)
 
 func _process(delta):
 	_anim_t += delta
 	if is_lit:
-		_sprite.frame = int(_anim_t * 6.0) % 2  # alternate frames 0-1
+		_sprite.modulate = Color(1, 1, 1, 1)
+		_sprite.frame = int(_anim_t * 8.0) % 4  # 4-frame flicker loop
 	else:
-		_sprite.frame = 2  # unlit frame
+		_sprite.modulate = Color(0.4, 0.4, 0.45, 1)  # dim, extinguished
+		_sprite.frame = 0
 	queue_redraw()
 
 func is_in_range(player_pos: Vector2) -> bool:

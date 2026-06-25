@@ -13,6 +13,12 @@ func _ready():
 			"offset": Vector2(randf_range(-7.0, 7.0), randf_range(-4.0, 4.0)),
 			"r":      randf_range(2.5, 5.5),
 		})
+	# Register as evidence for EvidenceSystem
+	var es = get_tree().get_first_node_in_group("evidence_system") if get_tree() else null
+	if es == null:
+		es = get_tree().root.find_child("EvidenceSystem", true, false) if get_tree() else null
+	if es and es.has_method("add_evidence"):
+		es.add_evidence("BLOOD_POOL", global_position)
 
 func _process(delta: float):
 	_timer -= delta
